@@ -10,7 +10,7 @@
 //! timestamp u48 + session u16, so the timestamp advances by exactly 2000 per frame.
 //! Uplinks are queued at RADIO END and decrypted by the CCM interrupt.
 
-use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
+use core::ptr::{addr_of, addr_of_mut};
 
 use crate::radio::{self, Event, EVENTS};
 use radio::{r, w};
@@ -54,8 +54,11 @@ const S0_PULSAR: u8 = 4;
 const SLOTS: usize = 5;
 const TL_NOTIFICATION: u8 = 0x40;
 const TL_READ: u8 = 0x10;
+const TL_ERROR: u8 = 0x20;
 /// Controller register: simple haptics, 1 byte amplitude (lcon `FUN_0000fbb8`).
 const REG_HAPTIC: u8 = 0x97;
+/// IMU configuration (units), read once from each controller as it joins (gamepad::imu_config).
+const REG_IMU_CONFIG: u8 = 0x32;
 /// Max TL request data (syncboss TL_HOST_MAX_PAYLOAD_LEN).
 pub const DL_MAX: usize = 32;
 /// Controller register: power off (system off; wakes on motion / button), any data.
@@ -219,11 +222,11 @@ fn rx_ptr(i: usize) -> u32 {
 }
 #[inline(always)]
 fn poke(addr: u32, v: u32) {
-    unsafe { write_volatile(addr as *mut u32, v) }
+    crate::hw::write(addr, v)
 }
 #[inline(always)]
 fn peek(addr: u32) -> u32 {
-    unsafe { read_volatile(addr as *const u32) }
+    crate::hw::read(addr)
 }
 
 // ---- thread-mode API ----
@@ -626,6 +629,15 @@ fn uplink(l: &mut Link, job: Job, mic_ok: bool) {
             if let Some(s) = assign_slot(l, &id, dev_type & 0x1_0000 != 0) {
                 l.join = Some((id, s));
                 l.stats.joins += 1;
+                l.slots[s as usize].custom = Some(Down {
+                    reg: REG_IMU_CONFIG,
+                    read: true,
+                    len: 0,
+                    data: [0; DL_MAX],
+                    seq: 0,
+                    tries: 0,
+                    haptic: None,
+                });
                 crate::gamepad::link_join(s, dev_type);
                 crate::gamepad::power_reset(s, l.frame);
                 if crate::settings::get().connect_buzz {
@@ -650,6 +662,10 @@ fn uplink(l: &mut Link, job: Job, mic_ok: bool) {
             s.pending = None;
             l.stats.dl_ok += 1;
         }
+    }
+    // Register read reply: [slot][reg][flags][data], flags without the notification or error bit.
+    if p.len() >= 3 && p[2] & (TL_NOTIFICATION | TL_ERROR) == 0 && p[1] == REG_IMU_CONFIG {
+        crate::gamepad::imu_config(slot, &p[3..]);
     }
     // [slot][tl id][0x40 | seq][log item 4][notification entries...]
     if p.len() > 7 && p[2] & TL_NOTIFICATION != 0 {

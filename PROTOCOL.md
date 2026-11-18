@@ -169,7 +169,7 @@ calibration-file read (`0x2b`) returns an error here.
 | `0x24`, `0x25` | read | app / bootloader version |
 | `0x2F` | read | battery: f32 %, then the cell voltage (u16, mV) |
 | `0x31` | read | IMU part number (`ICM20601`), then f32 accel and gyro scale |
-| `0x32` | read | IMU configuration: u16 accel range (32000 mg), gyro range (4000 °/s), accel and gyro rate (500 Hz), f32 g per count (1/1024), f32 °/s per count (1/8.192) |
+| `0x32` | read | IMU configuration: u16 accel range (32000 mg), gyro range (4000 °/s), accel and gyro rate (500 Hz), f32 g per count (1/1024), f32 °/s per count (1/8.192). The dongle reads it at each join and scales the IMU data to these units |
 | `0x05` | write | **power off** (wakes on motion or a button) |
 | `0x06` | write | `1` standby (packets almost stop), `0` active |
 | `0x97` | write | **vibration strength**, 1 byte; stays on until set back to 0 |
@@ -194,7 +194,8 @@ Nordic's Open USB DFU bootloader. The `nicenano` cargo feature builds for the ni
 | `board.rs` | what differs per board (pins are taken in `main.rs`, flash layouts are `memory-<board>.x`) |
 | `settings.rs`, `pairing.rs` | settings (flash `0xDE000`) and the pairing record (flash `0xDF000`) |
 | `selfupdate.rs`, `wdt.rs` | in-place firmware updates, watchdog |
-| `main.rs` | USB setup per mode, and the serial protocol the control panel uses (command list at the top) |
+| `main.rs`, `serial.rs` | USB setup per mode; the serial protocol the control panel uses (command list at the top of `serial.rs`) |
+| `hw.rs` | the only register / flash access (`read` / `write`), so the simulator in `sim/` can stand in for the chip |
 
 **USB modes.** Generic gamepad + serial port (`1209:5151`; firmware 1.0.0 used the pid.codes test id `1209:0001`), DS4 (`054C:09CC`, gamepad + serial port), XInput
 (`045E:028E`, Xbox 360 interfaces only, so no serial port), and VR (`1209:5151` with bcdDevice 0x0300: one vendor

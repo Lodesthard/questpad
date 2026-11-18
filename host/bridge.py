@@ -1,4 +1,5 @@
 """Host side of the dongle's raw radio bridge (USB CDC, COBS-framed)."""
+import os
 import struct
 import time
 
@@ -68,13 +69,19 @@ class Rx:
 
 class Bridge:
     def __init__(self, port=None):
+        # QUESTPAD_PORT: a serial port name, or e.g. socket://127.0.0.1:26772 for the simulator
+        # (sim/, `cargo run --release -- live`).
+        port = port or os.environ.get("QUESTPAD_PORT")
         if port is None:
             for p in serial.tools.list_ports.comports():
                 if (p.vid, p.pid) in DONGLE_IDS:
                     port = p.device
         if port is None:
             raise SystemExit("dongle bridge firmware not found (flash it with firmware/flash.sh)")
-        self.s = serial.Serial(port, 115200, timeout=0.05)
+        if "://" in port:
+            self.s = serial.serial_for_url(port, 115200, timeout=0.05)
+        else:
+            self.s = serial.Serial(port, 115200, timeout=0.05)
         self.acc = bytearray()
         self.tap = None  # called with every frame received, including those a command's reply wait skips
 

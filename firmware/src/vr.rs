@@ -9,9 +9,10 @@
 //! them directly; on Windows they carry WinUSB MS OS 2.0 descriptors. The serial port for the
 //! control panel stays, as in HID mode.
 //!
-//! Orientation is fused on the dongle (Mahony filter: gyro integrated at 500 Hz, tilt pulled
-//! toward gravity while the accelerometer reads about 1 g; yaw drifts only by the residual gyro
-//! bias, which `gamepad::Rest` measures whenever a controller lies still). Frames follow OpenXR:
+//! Orientation is fused on the dongle (Mahony PI filter: gyro integrated at 500 Hz, tilt pulled
+//! toward gravity while the accelerometer steadily reads about 1 g; the gyro bias is measured by
+//! `gamepad::Rest` whenever a controller lies still and learnt online by the integral term in
+//! between; see docs/vr.md, Drift. Behaviour checked in sim/). Frames follow OpenXR:
 //! world X right, Y up, Z toward the user (backward), yaw 0 = the controller's forward (-Z)
 //! pointing at world -Z when it connected or was last recentred. Controller frame: the same axes
 //! for a controller held naturally (the DS4 frame of `settings::imu_map`): X right, Y up, -Z
@@ -21,7 +22,8 @@
 //!   0      0x01 report type (state)
 //!   1      protocol version (1)
 //!   2      flags: b0 connected, b1 right hand, b2 orientation valid, b3 gyro bias calibrated,
-//!          b4 standby, b5 dead battery, b6 fresh IMU sample in this report
+//!          b4 standby, b5 dead battery, b6 fresh IMU sample in this report, b7 IMU units read
+//!          from the controller (register 0x32; else the Quest 1 units are assumed)
 //!   3      sequence number (wraps; increments on every new report)
 //!   4..8   controller IMU timestamp, µs (controller clock, low 32 bits)
 //!   8..12  dongle timestamp, µs, when the report was built (dongle clock, wraps)
@@ -71,6 +73,7 @@ pub const FLAG_GYRO_CAL: u8 = 0x08;
 pub const FLAG_STANDBY: u8 = 0x10;
 pub const FLAG_DEAD_BATTERY: u8 = 0x20;
 pub const FLAG_IMU_FRESH: u8 = 0x40;
+pub const FLAG_IMU_SCALE: u8 = 0x80;
 
 /// WinUSB device interface GUIDs (one per controller interface), for libusb / WinUSB on Windows.
 const GUID_LEFT: &[&str] = &["{5A1C0F51-3D1E-4B6A-9C51-51E7A0D00001}"];
@@ -83,8 +86,8 @@ pub fn enabled() -> bool {
     ENABLED.load(Ordering::Relaxed)
 }
 
-/// Latest report per side (0 left, 1 right).
-static REPORTS: [Signal<CriticalSectionRawMutex, [u8; REPORT_LEN]>; 2] = [Signal::new(), Signal::new()];
+/// Latest report per side (0 left, 1 right). `pub(crate)` for the PC simulator (sim/).
+pub(crate) static REPORTS: [Signal<CriticalSectionRawMutex, [u8; REPORT_LEN]>; 2] = [Signal::new(), Signal::new()];
 
 /// Requests from the USB side to the fusion (radio interrupt side): bit 0 recentre, bit 1 reset.
 static REQUESTS: [AtomicU8; 2] = [AtomicU8::new(0), AtomicU8::new(0)];
@@ -159,20 +162,30 @@ pub async fn run_out<E: EndpointOut>(side: Side, mut ep: E) -> ! {
                 continue;
             }
         };
-        match &buf[..n] {
-            &[CMD_HAPTIC, amp, ref rest @ ..] => {
-                let ms = if rest.len() >= 2 { u16::from_le_bytes([rest[0], rest[1]]) } else { 0 };
-                crate::link::rumble_side(side == Side::Right, amp);
-                stop_at = (amp != 0 && ms != 0).then(|| Instant::now() + Duration::from_millis(ms as u64));
-            }
-            &[CMD_RECENTER, ..] => {
-                REQUESTS[side as usize].fetch_or(REQ_RECENTER, Ordering::Relaxed);
-            }
-            &[CMD_RESET, ..] => {
-                REQUESTS[side as usize].fetch_or(REQ_RESET, Ordering::Relaxed);
-            }
-            _ => {}
+        if let Some(t) = command(side, &buf[..n]) {
+            stop_at = t;
         }
+    }
+}
+
+/// Apply one OUT command for `side`. Returns `Some(stop)` for a haptic command: when its motor
+/// should be switched off again (`None` = no timer). The caller turns the motor off at `stop`.
+pub fn command(side: Side, cmd: &[u8]) -> Option<Option<Instant>> {
+    match cmd {
+        &[CMD_HAPTIC, amp, ref rest @ ..] => {
+            let ms = if rest.len() >= 2 { u16::from_le_bytes([rest[0], rest[1]]) } else { 0 };
+            crate::link::rumble_side(side == Side::Right, amp);
+            Some((amp != 0 && ms != 0).then(|| Instant::now() + Duration::from_millis(ms as u64)))
+        }
+        &[CMD_RECENTER, ..] => {
+            REQUESTS[side as usize].fetch_or(REQ_RECENTER, Ordering::Relaxed);
+            None
+        }
+        &[CMD_RESET, ..] => {
+            REQUESTS[side as usize].fetch_or(REQ_RESET, Ordering::Relaxed);
+            None
+        }
+        _ => None,
     }
 }
 
@@ -193,6 +206,7 @@ pub struct Input {
     pub status: u8,
     pub imu_ts: u32,
     pub gyro_calibrated: bool,
+    pub imu_scale_reported: bool,
 }
 
 fn disconnected_report(side: Side, seq: u8) -> [u8; REPORT_LEN] {
@@ -221,26 +235,33 @@ pub fn dropped(side: Side) {
     REPORTS[side as usize].signal(disconnected_report(side, f.seq));
 }
 
-/// One IMU sample, in the right controller's IMU axes (after `left_to_right_frame`): accel 1024
-/// LSB/g; gyro 8.192 LSB/(deg/s) with the exact (fractional) resting offset removed; `ts` the
-/// controller's µs timestamp.
-pub fn imu(side: Side, accel: [i16; 3], gyro: [f32; 3], ts: u32) {
+/// One IMU sample, in the right controller's IMU axes (after `left_to_right_frame`), unrounded
+/// reference units: accel 1024 per g; gyro 8.192 per °/s with the exact resting offset removed; `ts` the
+/// controller's µs timestamp; `rest_epoch` changes whenever `gamepad::Rest` measures a new offset.
+pub fn imu(side: Side, accel: [f32; 3], gyro: [f32; 3], ts: u32, rest_epoch: u16) {
     let (gyro, accel) = to_openxr(gyro, accel);
     const G: f32 = 9.80665;
     const GYRO_SCALE: f32 = core::f32::consts::PI / 180.0 / 8.192;
     const ACCEL_SCALE: f32 = G / 1024.0;
     let w = gyro.map(|v| v * GYRO_SCALE);
-    let a = accel.map(|v| v as f32 * ACCEL_SCALE);
+    let a = accel.map(|v| v * ACCEL_SCALE);
     let f = fusion(side);
     let req = REQUESTS[side as usize].swap(0, Ordering::Relaxed);
     if req & REQ_RESET != 0 {
         f.init = false;
     }
+    if rest_epoch != f.rest_epoch {
+        // A fresh at-rest measurement already removes the bias: start the online estimate over,
+        // or both would correct it.
+        f.rest_epoch = rest_epoch;
+        f.bias = [0.0; 3];
+    }
     f.update(a, w, ts);
     if req & REQ_RECENTER != 0 && f.init {
         f.recenter();
     }
-    f.gyro = w;
+    // Report the rate with the online bias estimate removed too.
+    f.gyro = sub(w, f.bias);
     f.accel = a;
     f.fresh = true;
 }
@@ -264,6 +285,7 @@ pub fn publish(side: Side, inp: &Input) {
     set(&mut flags, inp.status & 0x10 != 0, FLAG_STANDBY);
     set(&mut flags, inp.status & 0x01 != 0, FLAG_DEAD_BATTERY);
     set(&mut flags, f.fresh, FLAG_IMU_FRESH);
+    set(&mut flags, inp.imu_scale_reported, FLAG_IMU_SCALE);
     f.fresh = false;
     r[2] = flags;
     r[3] = f.seq;
@@ -290,21 +312,38 @@ pub fn publish(side: Side, inp: &Input) {
 
 /// Controller IMU (right controller's axes) -> OpenXR controller frame, with the DS4 axis map
 /// from settings (x right, y up, z toward the user for a controller held naturally).
-fn to_openxr(gyro: [f32; 3], accel: [i16; 3]) -> ([f32; 3], [i16; 3]) {
+fn to_openxr(gyro: [f32; 3], accel: [f32; 3]) -> ([f32; 3], [f32; 3]) {
     let m = crate::settings::get().imu_map;
-    let axis = |i: usize| ((m[i] & 0x03) as usize).min(2);
-    let neg = |i: usize| m[i] & 0x80 != 0;
-    let g = |i: usize| if neg(i) { -gyro[axis(i)] } else { gyro[axis(i)] };
-    let a = |i: usize| if neg(i) { accel[axis(i)].saturating_neg() } else { accel[axis(i)] };
-    ([g(0), g(1), g(2)], [a(0), a(1), a(2)])
+    let map = |v: [f32; 3]| {
+        [0, 1, 2].map(|i| {
+            let x = v[((m[i] & 0x03) as usize).min(2)];
+            if m[i] & 0x80 != 0 { -x } else { x }
+        })
+    };
+    (map(gyro), map(accel))
 }
 
 // ---- orientation fusion ----
 
 /// Proportional gain pulling the tilt toward gravity, rad/s per unit of error (~2 s time constant).
 const KP: f32 = 0.5;
-/// Accelerometer magnitude window (fraction of 1 g) inside which it is trusted as gravity.
+/// Integral gain: learns the gyro bias from the same gravity error (rad/s² per unit of error).
+/// Without it the tilt settles off by bias / KP (~3° for a 1.5 °/s bias) until `gamepad::Rest`
+/// calibrates. Gravity only reveals bias about axes that are horizontal at the time, so the part
+/// about the vertical (yaw) is learnt only as the controller changes orientation: there is no
+/// magnetometer to do better. Tuned in sim/ (bias_while_moving, shake): 0.2 learns a 1.5 °/s bias
+/// in ~10 s while shaking moves the tilt ~2°.
+const KI: f32 = 0.2;
+/// Largest bias the integral may learn, rad/s (5 °/s, beyond any real controller's).
+const BIAS_MAX: f32 = 0.0873;
+/// The integral learns only below this rotation rate, rad/s (~60 °/s): fast turns add centripetal
+/// acceleration that the accelerometer would pass off as tilt.
+const LEARN_MAX_RATE: f32 = 1.0;
+/// Accelerometer magnitude window (fraction of 1 g) inside which it is trusted as gravity...
 const GRAVITY_TOLERANCE: f32 = 0.1;
+/// ...once it has stayed there this many samples in a row (20 ms): a shaken controller's reading
+/// sweeps through 1 g in passing, pointing anywhere.
+const GRAVITY_STEADY: u8 = 10;
 
 #[derive(Clone, Copy)]
 struct Fusion {
@@ -317,10 +356,26 @@ struct Fusion {
     accel: [f32; 3],
     fresh: bool,
     seq: u8,
+    /// Online gyro bias estimate, rad/s, controller frame (subtracted from the gyro).
+    bias: [f32; 3],
+    /// `gamepad::Rest` epoch the estimate belongs to.
+    rest_epoch: u16,
+    /// Samples in a row with the accelerometer reading about 1 g.
+    steady: u8,
 }
 
-const FUSION: Fusion =
-    Fusion { q: [1.0, 0.0, 0.0, 0.0], init: false, last_ts: 0, gyro: [0.0; 3], accel: [0.0; 3], fresh: false, seq: 0 };
+const FUSION: Fusion = Fusion {
+    q: [1.0, 0.0, 0.0, 0.0],
+    init: false,
+    last_ts: 0,
+    gyro: [0.0; 3],
+    accel: [0.0; 3],
+    fresh: false,
+    seq: 0,
+    bias: [0.0; 3],
+    rest_epoch: 0,
+    steady: 0,
+};
 
 /// Per side (only touched from the radio-side interrupts, like `gamepad::HANDS`).
 static mut FUSIONS: [Fusion; 2] = [FUSION; 2];
@@ -340,6 +395,7 @@ impl Fusion {
             }
             self.q = from_up(scale(a, 1.0 / an));
             self.init = true;
+            self.bias = [0.0; 3];
             self.last_ts = ts;
             self.recenter();
             return;
@@ -347,11 +403,18 @@ impl Fusion {
         let dt_us = ts.wrapping_sub(self.last_ts);
         self.last_ts = ts;
         let dt = if dt_us == 0 || dt_us > 50_000 { 0.002 } else { dt_us as f32 * 1e-6 };
-        let mut w = w;
-        if abs(an - G) < GRAVITY_TOLERANCE * G {
+        let rate = norm(w);
+        let mut w = sub(w, self.bias);
+        self.steady = if abs(an - G) < GRAVITY_TOLERANCE * G { self.steady.saturating_add(1) } else { 0 };
+        if self.steady >= GRAVITY_STEADY {
             // Measured up (accel) vs estimated up (world +Y in the controller frame).
             let up = rotate(conj(self.q), [0.0, 1.0, 0.0]);
             let e = cross(scale(a, 1.0 / an), up);
+            if rate < LEARN_MAX_RATE {
+                for i in 0..3 {
+                    self.bias[i] = (self.bias[i] - KI * e[i] * dt).clamp(-BIAS_MAX, BIAS_MAX);
+                }
+            }
             w = [w[0] + KP * e[0], w[1] + KP * e[1], w[2] + KP * e[2]];
         }
         // q += dt / 2 * q ⊗ (0, w)
@@ -425,6 +488,10 @@ fn rotate(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
 
 fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+}
+
+fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
 
 fn scale(v: [f32; 3], s: f32) -> [f32; 3] {

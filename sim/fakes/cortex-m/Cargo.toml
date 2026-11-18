@@ -1,0 +1,6 @@
+[package]
+name = "cortex-m"
+version = "0.7.7"
+edition = "2021"
+publish = false
+description = "Simulator stand-in for the cortex-m items the firmware modules in sim/ use"

@@ -209,6 +209,10 @@ struct Hand {
     thumb_off_ms: Option<u64>,
     /// Controller status flags (ntf 6): `STATUS_DEAD_BATTERY`, 0x10 standby.
     status: u8,
+    /// IMU units from the controller's register 0x32, as factors to the reference units (gyro
+    /// 8.192 per °/s, accel 1024 per g); `None` until it answers (then the reference units, as
+    /// measured on Quest 1 controllers, are assumed).
+    imu_scale: Option<(f32, f32)>,
 }
 
 const STATUS_DEAD_BATTERY: u8 = 0x01;
@@ -226,6 +230,7 @@ const IDLE: Hand = Hand {
     thumb: false,
     thumb_off_ms: None,
     status: 0,
+    imu_scale: None,
 };
 
 /// The controller's own touch thresholds (ntf 5 bits 0..3) for X / A, Y / B, stick, trigger, in
@@ -274,6 +279,25 @@ pub fn link_drop(slot: u8) {
     publish();
 }
 
+/// The controller in `slot` answered register 0x32 (IMU configuration): u16 accel range (mg),
+/// u16 gyro range (°/s), u16 accel rate, u16 gyro rate (Hz), f32 g per count, f32 °/s per count.
+/// Its samples are converted to the reference units from now on, so every user of the IMU data
+/// (at-rest calibration, DS4, power policy, VR) keeps working whatever units the controller uses.
+/// Returns false (and keeps the reference units) for an implausible answer.
+pub fn imu_config(slot: u8, d: &[u8]) -> bool {
+    if d.len() < 16 {
+        return false;
+    }
+    let f = |i: usize| f32::from_le_bytes([d[i], d[i + 1], d[i + 2], d[i + 3]]);
+    let (g_per_count, dps_per_count) = (f(8), f(12));
+    // Plausible MEMS resolutions: 1/32768 .. 1/256 g, 1/262 .. 1 °/s per count (NaN fails too).
+    if !(1.0 / 32768.0..=1.0 / 256.0).contains(&g_per_count) || !(1.0 / 262.144..=1.0).contains(&dps_per_count) {
+        return false;
+    }
+    hands()[slot as usize].imu_scale = Some((dps_per_count * 8.192, g_per_count * 1024.0));
+    true
+}
+
 /// Battery % of the controller in `slot` (for low-battery warnings).
 pub fn battery(slot: u8) -> Option<u8> {
     hands()[slot as usize].battery
@@ -315,13 +339,16 @@ pub fn link_notifications(slot: u8, mut buf: &[u8]) {
                 h.battery = Some(d[0].min(100));
             }
             1 if len >= 18 => {
-                let mut accel = [i16_at(6), i16_at(8), i16_at(10)];
-                let mut gyro = [i16_at(12), i16_at(14), i16_at(16)];
+                // Reference units, unrounded (the VR fusion uses these), then rounded for the rest.
+                let (kg, ka) = h.imu_scale.unwrap_or((1.0, 1.0));
+                let mut accel_f = [i16_at(6), i16_at(8), i16_at(10)].map(|v| v as f32 * ka);
+                let mut gyro_f = [i16_at(12), i16_at(14), i16_at(16)].map(|v| v as f32 * kg);
                 if h.side == Some(Side::Left) {
-                    accel = left_to_right_frame(accel);
-                    gyro = left_to_right_frame(gyro);
+                    accel_f = left_to_right_frame(accel_f);
+                    gyro_f = left_to_right_frame(gyro_f);
                 }
-                let raw_gyro = gyro;
+                let accel = accel_f.map(round_i16);
+                let mut gyro = gyro_f.map(round_i16);
                 if let Some(side) = h.side {
                     let r = rest(side);
                     r.add(accel, gyro);
@@ -332,8 +359,8 @@ pub fn link_notifications(slot: u8, mut buf: &[u8]) {
                     // The fusion integrates the gyro, so it takes the exact (fractional) offset: the
                     // whole-count one leaves up to 0.06 °/s, a few degrees of yaw drift per minute.
                     let exact = rest(side).offset_exact;
-                    let g = [0, 1, 2].map(|i| raw_gyro[i] as f32 - exact[i]);
-                    crate::vr::imu(side, accel, g, h.imu.ts);
+                    let g = [0, 1, 2].map(|i| gyro_f[i] - exact[i]);
+                    crate::vr::imu(side, accel_f, g, h.imu.ts, rest(side).epoch);
                 }
                 if h.imu.gyro.iter().any(|g| (*g as i32).abs() > STILL_GYRO) {
                     activity()[slot].moving = true;
@@ -387,6 +414,7 @@ pub fn link_notifications(slot: u8, mut buf: &[u8]) {
                 status: h.status,
                 imu_ts: h.imu.ts,
                 gyro_calibrated: rest(side).learned,
+                imu_scale_reported: h.imu_scale.is_some(),
             },
         );
     }
@@ -417,6 +445,8 @@ struct Rest {
     offset_exact: [f32; 3],
     /// `offset` has been measured at least once since power-up.
     learned: bool,
+    /// +1 each time `offset` is measured (the VR fusion restarts its own bias estimate).
+    epoch: u16,
     n: i32,
     lo: [i16; 6],
     hi: [i16; 6],
@@ -425,7 +455,7 @@ struct Rest {
     prev: Option<[i32; 6]>,
 }
 
-const REST: Rest = Rest { offset: [0; 3], offset_exact: [0.0; 3], learned: false, n: 0, lo: [i16::MAX; 6], hi: [i16::MIN; 6], sum: [0; 6], prev: None };
+const REST: Rest = Rest { offset: [0; 3], offset_exact: [0.0; 3], learned: false, epoch: 0, n: 0, lo: [i16::MAX; 6], hi: [i16::MIN; 6], sum: [0; 6], prev: None };
 
 /// Per hand (only touched from the radio-side interrupts, like `HANDS`).
 static mut RESTS: [Rest; 2] = [REST; 2];
@@ -458,17 +488,23 @@ impl Rest {
                     self.offset_exact[i] = s as f32 / (2 * REST_SAMPLES) as f32;
                 }
                 self.learned = true;
+                self.epoch = self.epoch.wrapping_add(1);
             }
         }
-        *self = Rest { offset: self.offset, offset_exact: self.offset_exact, learned: self.learned, prev: if still { Some(self.sum) } else { None }, ..REST };
+        *self = Rest { offset: self.offset, offset_exact: self.offset_exact, learned: self.learned, epoch: self.epoch, prev: if still { Some(self.sum) } else { None }, ..REST };
     }
 }
 
 /// The left controller's IMU sits rotated 90° about Z from the right's (measured at rest on a table:
 /// left X = right Y, left Y = -right X). Turn its samples into the right controller's axes so one
 /// `imu_map` (measured on the right) fits both.
-fn left_to_right_frame(v: [i16; 3]) -> [i16; 3] {
-    [v[1].saturating_neg(), v[0], v[2]]
+fn left_to_right_frame(v: [f32; 3]) -> [f32; 3] {
+    [-v[1], v[0], v[2]]
+}
+
+/// Nearest i16 (saturating; core has no f32::round).
+fn round_i16(v: f32) -> i16 {
+    (if v >= 0.0 { v + 0.5 } else { v - 0.5 }) as i16
 }
 
 /// Radial deadzone, rescaled so output starts at 0 at its edge. Flips y to HID (+y down).

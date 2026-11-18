@@ -407,8 +407,8 @@ fn calibration(buf: &mut [u8]) {
 
 /// A stable fake MAC address from the dongle's FICR device id.
 fn mac() -> [u8; 6] {
-    let id0 = unsafe { core::ptr::read_volatile(0x1000_0060 as *const u32) }.to_le_bytes();
-    let id1 = unsafe { core::ptr::read_volatile(0x1000_0064 as *const u32) }.to_le_bytes();
+    let id0 = crate::hw::read(0x1000_0060).to_le_bytes();
+    let id1 = crate::hw::read(0x1000_0064).to_le_bytes();
     [id0[0], id0[1], id0[2], id0[3], id1[0], 0x02]
 }
 

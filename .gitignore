@@ -1,5 +1,6 @@
 # Build / environments
 firmware/target/
+sim/target/
 host/.venv/
 __pycache__/
 *.pyc

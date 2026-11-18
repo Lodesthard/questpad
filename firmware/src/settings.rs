@@ -1,7 +1,6 @@
 //! User settings, kept in flash page 0xDE000 (next to the pairing page) and mirrored in RAM.
 
 use core::cell::Cell;
-use core::ptr::{read_volatile, write_volatile};
 
 use critical_section::Mutex;
 
@@ -200,7 +199,7 @@ fn pack(s: &Settings) -> [u32; WORDS] {
 }
 
 fn flash_word(i: usize) -> u32 {
-    unsafe { read_volatile((PAGE + 4 * i as u32) as *const u32) }
+    crate::hw::read(PAGE + 4 * i as u32)
 }
 
 /// The data bytes of a valid record: `magic`, `header` words in all, `data_words`, checksum.
@@ -243,16 +242,16 @@ pub fn load() -> Settings {
 pub fn store(s: &Settings) -> bool {
     critical_section::with(|cs| CURRENT.borrow(cs).set(*s));
     let w = pack(s);
-    critical_section::with(|_| unsafe {
-        write_volatile(NVMC_CONFIG as *mut u32, 2);
-        write_volatile(NVMC_ERASEPAGE as *mut u32, PAGE);
-        while read_volatile(NVMC_READY as *const u32) == 0 {}
-        write_volatile(NVMC_CONFIG as *mut u32, 1);
+    critical_section::with(|_| {
+        crate::hw::write(NVMC_CONFIG, 2);
+        crate::hw::write(NVMC_ERASEPAGE, PAGE);
+        while crate::hw::read(NVMC_READY) == 0 {}
+        crate::hw::write(NVMC_CONFIG, 1);
         for (i, &x) in w.iter().enumerate() {
-            write_volatile((PAGE + 4 * i as u32) as *mut u32, x);
-            while read_volatile(NVMC_READY as *const u32) == 0 {}
+            crate::hw::write(PAGE + 4 * i as u32, x);
+            while crate::hw::read(NVMC_READY) == 0 {}
         }
-        write_volatile(NVMC_CONFIG as *mut u32, 0);
+        crate::hw::write(NVMC_CONFIG, 0);
     });
     load() == *s
 }

@@ -45,6 +45,7 @@ extern "C" {
 #define QUESTPAD_VR_FLAG_STANDBY 0x10
 #define QUESTPAD_VR_FLAG_DEAD_BATTERY 0x20
 #define QUESTPAD_VR_FLAG_IMU_FRESH 0x40 //!< this report carries a new IMU sample
+#define QUESTPAD_VR_FLAG_IMU_SCALE 0x80 //!< IMU units read from the controller (register 0x32)
 
 // Buttons (byte 60).
 #define QUESTPAD_VR_BTN_A_X 0x01      //!< A (right) / X (left)

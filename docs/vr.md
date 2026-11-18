@@ -43,6 +43,56 @@ Held naturally and pointed at the screen after `--recenter`, a controller reads 
 increases yaw, tipping the front up increases pitch and rolling left increases roll. On Linux add a udev rule for
 `1209:5151` (or run it as root). On Windows the VR interfaces get WinUSB by themselves.
 
+## Simulator (no dongle, no controllers)
+`sim/` runs the dongle firmware on a PC: the real `radio.rs`, `link.rs`, `pairing.rs`, `settings.rs`,
+`serial.rs`, `ui.rs`, `wdt.rs`, `gamepad.rs`, `vr.rs`, `ds4.rs`, `xinput.rs` and `cobs.rs`, compiled for the host
+and unchanged. Every register and flash access in the firmware goes through `firmware/src/hw.rs` (plain volatile
+accesses on the dongle: the image is byte for byte the same), and in the simulator that module is an **nRF52840
+peripheral emulator**: TIMER0 and PPI, the RADIO (ramp-up, shorts, logical addresses, packet layout, on-air time),
+the CCM, flash, RNG and watchdog. The firmware's interrupt handlers run as an NVIC would run them, its async tasks
+(pairing, button, LED, mode switch, watchdog) on the real embassy executor, all in simulated time and deterministic.
+
+On the air are **virtual Touch controllers** speaking the controller side of the protocol: advertising and the
+DM link for pairing, beacon search and hopping, joining, encrypted uplinks (a keyed checksum stands in for AES-CCM,
+so the key and the per-packet IV are still checked) with IMU, buttons, stick, trigger, grip, touch and battery,
+register requests (haptics, power off, IMU units). Their IMU model has gyro bias, noise and, for the error budget,
+scale, misalignment and accelerometer errors.
+
+Not simulated: USB (`main.rs`: the scenarios read the pad state and VR reports and call the serial handler
+directly), the RAM routine that flashes a firmware update (a stand-in writes the emulated flash), real AES.
+
+**Tests.** `cargo run --release -- test` runs 40 scenarios in about a second, each in a fresh process:
+- *direct* (the IMU / fusion maths, fed straight into `gamepad.rs`): start-up poses, turns on both hands, bias
+  calibration and drift, bias learnt while moving, shaking, inputs, recentre, reset, IMU units (0x32);
+- *stack* (everything from the radio up): pairing with the dongle's button (and timeout, cancel), host-driven
+  pairing (`dm.py`'s commands), joining and hopping, two controllers and the DS4 / XInput / HID reports, haptics,
+  the power-off and mode gestures, the button's mode switch and forget, the control panel's serial protocol,
+  firmware update, a controller with the wrong key, signal loss and rejoin, low battery, idle power-off, watchdog,
+  LED, VR orientation through the whole chain, raw sniffing (`sniff_adv.py`'s commands).
+
+```sh
+cd sim
+cargo run --release -- test                       # all scenarios (exit code 1 if any fails)
+cargo run --release -- test stack_pairing_button  # one, with its numbers
+cargo run --release -- budget                     # what each sensor imperfection costs
+```
+
+**Live.** `cargo run --release -- live` runs the whole dongle in real time with two paired controllers:
+- `python host/vrsim_view.py`: 3D view of each controller where it really is (grey) and where the dongle says it is
+  (colour); drag to turn, wheel to roll, `a` `b` `s` `m` buttons, `t` `g` trigger and grip, arrows for the stick,
+  `h` buzz, `r` recentre, `x` reset, `d` disconnect;
+- the dongle's serial port is on TCP 26772, so the real host tools work against it:
+  `QUESTPAD_PORT=socket://127.0.0.1:26772 python host/gui.py` (the control panel: status, settings, modes,
+  pairing, buzz...), and `regs.py`, `link.py`, `dsu.py` the same way;
+- the VR reports go to UDP `127.0.0.1:26770`, byte for byte as on USB, so a Monado driver can take them from a
+  socket while it is being written (datagrams starting with `0xF0` carry the viewer's ground truth: skip them;
+  OUT commands go back as text to UDP 26771, e.g. `R cmd=10c86400`, see `sim/src/live.rs`).
+
+The emulated flash lives in `sim/target/release/live-flash.bin`, so settings and pairing survive restarts; a mode
+switch or firmware update restarts the simulator like the dongle reboots. `--auto` moves the controllers by
+themselves. They start with a gyro bias, as real ones do: expect a degree or two of yaw drift until they have lain
+still for a second, or press `r`.
+
 ## USB interface
 VR mode keeps the usual ids, `1209:5151`, with **bcdDevice 0x0300** and product string `QuestPad VR`.
 The device is a composite of:
@@ -66,7 +116,7 @@ dongle timestamp (so a disconnected or sleeping controller is still visible).
 |---|---|---|
 | 0 | u8 | report type, `0x01` = state |
 | 1 | u8 | protocol version, `1` |
-| 2 | u8 | flags: `0x01` connected, `0x02` right hand, `0x04` orientation valid, `0x08` gyro bias calibrated, `0x10` standby, `0x20` dead battery, `0x40` fresh IMU sample |
+| 2 | u8 | flags: `0x01` connected, `0x02` right hand, `0x04` orientation valid, `0x08` gyro bias calibrated, `0x10` standby, `0x20` dead battery, `0x40` fresh IMU sample, `0x80` IMU units read from the controller (register `0x32`; without it the Quest 1 units are assumed) |
 | 3 | u8 | sequence number, +1 per new report (wraps) |
 | 4..8 | u32 | controller IMU timestamp, µs (controller clock, wraps) |
 | 8..12 | u32 | dongle timestamp when the report was built, µs (dongle clock, wraps) |
@@ -86,10 +136,47 @@ world −Z when it connected or was last recentred. Controller frame, for a cont
 −Z forward (the direction it points). Angular velocity is in the controller frame; rotate it by the orientation to
 get it in world space (`ω_world = q · ω · q⁻¹`).
 
-**Fusion.** A Mahony filter on the dongle integrates the gyro at 500 Hz and pulls the tilt toward gravity whenever
-the accelerometer reads within 10 % of 1 g (gain 0.5 rad/s, about a 2 s time constant). Roll and pitch are
-absolute. Yaw has no reference, so it drifts with whatever gyro bias is left after calibration (not yet measured
-on hardware: recentre now and then). When a controller (re)connects, its orientation starts level with gravity and facing −Z.
+**Fusion.** A Mahony filter on the dongle integrates the gyro at 500 Hz and pulls the tilt toward gravity
+(proportional gain 0.5, about a 2 s time constant). Gravity is trusted only once the accelerometer has read within
+10 % of 1 g for 20 ms in a row, so shaking a controller doesn't drag its tilt. Roll and pitch are absolute. When a
+controller (re)connects, its orientation starts level with gravity and facing −Z.
+
+**Drift.** The gyro's resting offset (0.3–1.7 °/s on these controllers) is removed two ways:
+- **at rest**: whenever a controller lies still for a second, the dongle measures the offset exactly;
+- **online**: the filter's integral term (gain 0.2) learns it from the gravity error while the controller is in use
+  (and not spinning faster than ~60 °/s). Each at-rest measurement restarts it.
+
+Gravity can't show bias about the vertical axis, and the Touch controllers have no magnetometer, so the online term
+learns the yaw part only as the controller changes orientation. In normal use it does: in the simulator a controller
+waved around with a 1.5 °/s bias, never set down, drifts 0.17° per 10 s instead of up to 15°. Held in one pose for a
+long time without being set down, the vertical part of the bias still turns the yaw. Then setting the controller
+down for a second, or recentring (`11`, e.g. together with the headset), puts it right. None of this has been
+measured on hardware yet.
+
+**IMU units.** When a controller joins, the dongle reads its IMU configuration (register `0x32`: g and °/s per
+count) and converts its samples to the units measured on Quest 1 controllers, so a controller with another IMU
+or range still reports the right rates and orientation. Flag `0x80` says the read succeeded. Without it, wrong
+units would scale every rotation (in the simulator, a controller with 4x finer gyro units turns 120° for a real
+30°).
+
+**Precision.** `cd sim && cargo run --release -- budget` measures what each imperfection of a real sensor costs
+(right controller, gyro bias 1.5 °/s, calibrated at rest, recentred, then 5 full turns at 180 °/s, pitch and roll
+sweeps and 10 s of waving):
+
+| sensor | yaw error after 5 turns | then tilt error |
+|---|---|---|
+| ideal (bias and noise only) | +0.05° | 0.03° |
+| gyro scale +1 % | +18° | 0.13° |
+| sensor axes 1° off | +0.06° (−1° after the sweeps) | 0.9° |
+| accelerometer offset 10 mg | +0.04° (+1.5° after) | 1.1° |
+| accelerometer offset 30 mg | +0.02° (+3.5° after) | 2.8° |
+| accelerometer scale ±1 % | +0.05° | 0.3° |
+| all at typical consumer-MEMS levels | −27° | 1.3° (3.5° at worst) |
+
+The gyro scale factor dominates: a 1 % error is 3.6° per full turn. Accelerometer offsets tilt the controller and,
+through the integral term, leak a little into the yaw. Correcting these needs a per-controller calibration (the
+factory one, if the controllers expose it, or a short procedure: full turns against a fixed edge for the gyro
+scales, a few still poses for the accelerometer).
 
 ## Commands (OUT)
 | bytes | command |

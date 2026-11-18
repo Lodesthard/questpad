@@ -5,8 +5,6 @@
 //! and memory-*.x stops the image below this page, so the record survives reflashing (the
 //! dongle's bootloader DFU may wipe it).
 
-use core::ptr::{read_volatile, write_volatile};
-
 const PAGE: u32 = 0xDF000;
 const MAGIC: u32 = 0x3152_5051; // "QPR1"
 const WORDS: usize = 7; // magic, network_id, key[16], crc
@@ -55,30 +53,28 @@ pub fn generate() -> Pairing {
 
 fn rng_byte() -> u8 {
     const RNG: u32 = 0x4000_D000;
-    unsafe {
-        write_volatile((RNG + 0x504) as *mut u32, 1); // CONFIG: bias correction
-        write_volatile((RNG + 0x100) as *mut u32, 0); // EVENTS_VALRDY
-        write_volatile(RNG as *mut u32, 1); // TASKS_START
-        while read_volatile((RNG + 0x100) as *const u32) == 0 {}
-        write_volatile((RNG + 0x004) as *mut u32, 1); // TASKS_STOP
-        read_volatile((RNG + 0x508) as *const u32) as u8
-    }
+    crate::hw::write(RNG + 0x504, 1); // CONFIG: bias correction
+    crate::hw::write(RNG + 0x100, 0); // EVENTS_VALRDY
+    crate::hw::write(RNG, 1); // TASKS_START
+    while crate::hw::read(RNG + 0x100) == 0 {}
+    crate::hw::write(RNG + 0x004, 1); // TASKS_STOP
+    crate::hw::read(RNG + 0x508) as u8
 }
 
 /// Erase the stored pairing (the controllers then need pairing again).
 pub fn forget() {
-    critical_section::with(|_| unsafe {
-        write_volatile(NVMC_CONFIG as *mut u32, 2);
-        write_volatile(NVMC_ERASEPAGE as *mut u32, PAGE);
+    critical_section::with(|_| {
+        crate::hw::write(NVMC_CONFIG, 2);
+        crate::hw::write(NVMC_ERASEPAGE, PAGE);
         wait_ready();
-        write_volatile(NVMC_CONFIG as *mut u32, 0);
+        crate::hw::write(NVMC_CONFIG, 0);
     });
 }
 
 pub fn load() -> Option<Pairing> {
     let mut w = [0u32; WORDS];
     for (i, x) in w.iter_mut().enumerate() {
-        *x = unsafe { read_volatile((PAGE + 4 * i as u32) as *const u32) };
+        *x = crate::hw::read(PAGE + 4 * i as u32);
     }
     if w[0] != MAGIC || w[6] != checksum(&w[..6]) {
         return None;
@@ -91,23 +87,23 @@ pub fn load() -> Option<Pairing> {
 }
 
 fn wait_ready() {
-    while unsafe { read_volatile(NVMC_READY as *const u32) } == 0 {}
+    while crate::hw::read(NVMC_READY) == 0 {}
 }
 
 /// Erase the page and write the record. The CPU stalls for the ~85 ms erase, so callers
 /// stop the radio first.
 pub fn store(p: &Pairing) -> bool {
     let w = words(p);
-    critical_section::with(|_| unsafe {
-        write_volatile(NVMC_CONFIG as *mut u32, 2);
-        write_volatile(NVMC_ERASEPAGE as *mut u32, PAGE);
+    critical_section::with(|_| {
+        crate::hw::write(NVMC_CONFIG, 2);
+        crate::hw::write(NVMC_ERASEPAGE, PAGE);
         wait_ready();
-        write_volatile(NVMC_CONFIG as *mut u32, 1);
+        crate::hw::write(NVMC_CONFIG, 1);
         for (i, &x) in w.iter().enumerate() {
-            write_volatile((PAGE + 4 * i as u32) as *mut u32, x);
+            crate::hw::write(PAGE + 4 * i as u32, x);
             wait_ready();
         }
-        write_volatile(NVMC_CONFIG as *mut u32, 0);
+        crate::hw::write(NVMC_CONFIG, 0);
     });
     load().is_some_and(|q| q.network_id == p.network_id && q.key == p.key)
 }

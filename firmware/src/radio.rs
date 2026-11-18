@@ -13,7 +13,7 @@
 //!     replicating syncboss `pulsar_dm_host.c` timing.
 //!   - Link host: the main Pulsar link to paired controllers (`link.rs`).
 
-use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
+use core::ptr::{addr_of, addr_of_mut};
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -97,19 +97,19 @@ pub const BUF_LEN: usize = 260;
 
 #[inline(always)]
 pub(crate) fn w(off: u32, val: u32) {
-    unsafe { write_volatile((RADIO_BASE + off) as *mut u32, val) }
+    crate::hw::write(RADIO_BASE + off, val)
 }
 #[inline(always)]
 pub(crate) fn r(off: u32) -> u32 {
-    unsafe { read_volatile((RADIO_BASE + off) as *const u32) }
+    crate::hw::read(RADIO_BASE + off)
 }
 #[inline(always)]
 pub fn poke(addr: u32, val: u32) {
-    unsafe { write_volatile(addr as *mut u32, val) }
+    crate::hw::write(addr, val)
 }
 #[inline(always)]
 pub fn peek(addr: u32) -> u32 {
-    unsafe { read_volatile(addr as *const u32) }
+    crate::hw::read(addr)
 }
 
 pub enum Event {

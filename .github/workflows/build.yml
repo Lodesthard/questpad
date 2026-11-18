@@ -17,6 +17,8 @@ jobs:
           rustup default stable
       - name: Host tool self-tests
         run: python3 host/mapping.py
+      - name: VR simulator scenarios (firmware VR code on the host)
+        run: cargo run --release --manifest-path sim/Cargo.toml -- test
       - name: Build firmware and package
         run: tools/package.sh
       - uses: actions/upload-artifact@v4

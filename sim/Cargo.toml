@@ -1,0 +1,29 @@
+[package]
+name = "questpad-sim"
+version = "1.3.0"
+license = "MIT OR Apache-2.0"
+description = "PC simulator: the dongle firmware on an emulated nRF52840, with virtual Touch controllers"
+edition = "2021"
+publish = false
+
+# The firmware modules compiled here (src/main.rs includes them by path) need the same crates, on
+# the host. embassy-time's mock driver is the simulated clock; embassy-executor runs the firmware's
+# tasks (no platform: world.rs polls it); critical sections are implemented in src/hw.rs.
+# fakes/ stand in for embassy-nrf and cortex-m (interrupt setup, button, LED, reset).
+# Board, as in firmware/Cargo.toml (default: the nRF52840 Dongle).
+[features]
+nicenano = []
+
+[dependencies]
+embassy-time = { version = "0.5.1", features = ["mock-driver", "generic-queue-32"] }
+embassy-sync = "0.8.0"
+embassy-usb = "0.6.0"
+embassy-futures = "*"
+embassy-executor = "0.10.0"
+critical-section = "1"
+heapless = "0.8"
+embassy-nrf = { path = "fakes/embassy-nrf" }
+cortex-m = { path = "fakes/cortex-m" }
+
+[profile.release]
+debug = 1
