@@ -34,7 +34,7 @@
 
 ## Repo
 - Fork: origin = Lodesthard/questpad, upstream = Jakey-Jakey/questpad
-- CI (.github/workflows/build.yml) only on push to main / PRs (runs mapping.py + sim scenarios + package); Actions disabled on fork until enabled
+- CI (.github/workflows/build.yml) on push to main / PRs / manual (`gh workflow run build -R Lodesthard/questpad`): mapping.py + sim scenarios + package; enabled on the fork. Check with `gh run list -R Lodesthard/questpad`
 - autocrlf on: "LF will be replaced by CRLF" warnings are harmless
 
 ## graphify
