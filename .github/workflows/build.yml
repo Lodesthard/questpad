@@ -11,7 +11,7 @@ jobs:
   firmware:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Rust toolchain
         run: |
           rustup toolchain install stable --profile minimal --target thumbv7em-none-eabihf --component llvm-tools
@@ -22,7 +22,7 @@ jobs:
         run: cargo run --release --manifest-path sim/Cargo.toml -- test
       - name: Build firmware and package
         run: tools/package.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: questpad
           path: dist/*.zip
