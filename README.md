@@ -194,6 +194,7 @@ See [docs/vr.md → Simulator](docs/vr.md#simulator-no-dongle-no-controllers).
 | `host/vrtest.py` | VR mode check on a PC: live orientation and inputs of both controllers, `--buzz`, `--recenter` |
 | `host/vrsim_view.py` | 3D view of the simulator's controllers (true vs. dongle orientation) |
 | `monado/questpad_vr.h` | C parser for the VR reports, for a Monado driver ([docs/vr.md](docs/vr.md)) |
+| `monado/README.md` | what the dongle sends in VR mode, for whoever writes the Monado driver (in French) |
 | `host/dm.py`, `host/sniff_adv.py` | pairing-mode tools |
 | `research/` | the analysis scripts used to work out the protocol |
 

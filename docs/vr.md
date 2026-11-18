@@ -123,7 +123,7 @@ dongle timestamp (so a disconnected or sleeping controller is still visible).
 | 12..28 | f32 × 4 | orientation quaternion **x, y, z, w**, controller → world |
 | 28..40 | f32 × 3 | angular velocity, rad/s, **controller frame**, gyro bias removed |
 | 40..52 | f32 × 3 | acceleration (specific force), m/s², controller frame: +9.81 on y when level and still |
-| 52..56 | i16 × 2 | thumbstick x, y: +x right, +y up, ±32000 full, exactly 0, 0 at rest |
+| 52..56 | i16 × 2 | thumbstick x, y: +x right, +y up, ±32000 full, 0, 0 at rest; raw from the controller (no deadzone added by the dongle) |
 | 56..58 | u16 | trigger, 0 released .. 4095 fully pulled |
 | 58..60 | u16 | grip, 0 .. 4095 |
 | 60 | u8 | buttons: `0x01` A / X, `0x02` B / Y, `0x04` stick click, `0x08` Oculus (right) / Menu (left) |
