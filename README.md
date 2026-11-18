@@ -4,7 +4,7 @@
 
 **Use Meta Quest Touch controllers as a regular controller.**
 
-[![build](https://github.com/Jakey-Jakey/questpad/actions/workflows/build.yml/badge.svg)](https://github.com/Jakey-Jakey/questpad/actions/workflows/build.yml)
+[![build](https://github.com/Lodesthard/questpad/actions/workflows/build.yml/badge.svg)](https://github.com/Lodesthard/questpad/actions/workflows/build.yml)
 [![license](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-blue)](#license)
 
 <img src="docs/gui.png" alt="The QuestPad control panel" width="560">
@@ -20,7 +20,9 @@ Quest controllers work with headsets over a private 2.4 GHz radio link. QuestPad
 - **Motion in emulators**: Cemu, Dolphin, Ryujinx and other DSU (Cemuhook) emulators get each controller's gyro and
   accelerometer from the control panel. [Setup](docs/motion.md).
 - **VR mode**: both controllers as separate 3DoF controllers (orientation, inputs, haptics) for an OpenXR runtime,
-  e.g. a Monado fork on an Android phone with the dongle plugged into it. [Protocol and setup](docs/vr.md).
+  e.g. a Monado fork on an Android phone with the dongle plugged into it. The dongle fuses each controller's gyro and
+  accelerometer itself (Mahony filter that also learns the gyro offset while you move, plus at-rest calibration), so
+  the yaw barely drifts. [Protocol and setup](docs/vr.md).
 - **Rumble**, plus small buzzes when a controller connects and when its battery runs low.
 - **Pair with one button press** on the dongle; no computer needed. 
 - **An off switch the controllers never had**: hold Oculus or Menu for 3 s, put them down, and they switch off after about a second.
@@ -50,7 +52,9 @@ Contributions that make QuestPad work with more controllers are very welcome. Se
 
 ## Quick start
 1. **Download** the latest `questpad-<version>.zip` from [Releases](https://github.com/Jakey-Jakey/questpad/releases)
-   and unzip it.
+   and unzip it. VR mode is only in this fork for now: take the `questpad` zip from the latest
+   [build](https://github.com/Lodesthard/questpad/actions/workflows/build.yml) instead (or build it, see
+   [For developers](#for-developers)).
 2. **Open the control panel**: double-click **`QuestPad.pyw`** (Windows) or **`QuestPad.command`** (macOS), or run
    `python3 host/gui.py`.
 3. **Install the firmware**: click **Install / update firmware…**, choose `questpad.bin`, then press the dongle's
@@ -166,15 +170,30 @@ firmware/flash.sh --nicenano # nice!nano v2 build, installed through its UF2 boo
 tools/package.sh             # build the release zip into dist/
 ```
 
+**Simulator** (no dongle, no controllers): the firmware runs on your computer on an emulated nRF52840, with
+virtual Touch controllers on an emulated radio. CI runs its scenarios on every push.
+```sh
+cd sim
+cargo run --release -- test      # 40 scenarios: pairing, link, inputs, IMU, VR fusion and drift, serial, update...
+cargo run --release -- budget    # orientation error caused by each sensor imperfection
+cargo run --release -- live      # real-time virtual dongle: python host/vrsim_view.py shows the controllers in 3D,
+                                 # QUESTPAD_PORT=socket://127.0.0.1:26772 python host/gui.py opens the real panel on it
+```
+See [docs/vr.md → Simulator](docs/vr.md#simulator-no-dongle-no-controllers).
+
 | path | what |
 |---|---|
 | `firmware/` | dongle firmware (Rust, [embassy](https://embassy.dev)); `--features nicenano` for the nice!nano |
+| `sim/` | PC simulator: the firmware on an emulated chip with virtual controllers (scenarios, error budget, live mode) |
 | `host/gui.py` | control panel (Tkinter; pySerial bundled in `host/vendor`; `--demo` shows sample data) |
 | `host/dfu.py`, `host/selfupdate.py`, `host/uf2.py` | firmware install: dongle bootloader, dongle in place, nice!nano |
 | `host/link.py` | `--watch` live inputs / IMU / battery / link stats, `--log` the controllers' own debug log |
 | `host/dsu.py` | DSU (Cemuhook) motion server: built into the panel, or run on its own |
 | `host/dsu_client.py` | a DSU client like an emulator's: live view, `--guided` direction check, `--selftest` |
 | `host/regs.py` | read and write controller registers |
+| `host/vrtest.py` | VR mode check on a PC: live orientation and inputs of both controllers, `--buzz`, `--recenter` |
+| `host/vrsim_view.py` | 3D view of the simulator's controllers (true vs. dongle orientation) |
+| `monado/questpad_vr.h` | C parser for the VR reports, for a Monado driver ([docs/vr.md](docs/vr.md)) |
 | `host/dm.py`, `host/sniff_adv.py` | pairing-mode tools |
 | `research/` | the analysis scripts used to work out the protocol |
 
