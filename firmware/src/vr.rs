@@ -221,14 +221,15 @@ pub fn dropped(side: Side) {
     REPORTS[side as usize].signal(disconnected_report(side, f.seq));
 }
 
-/// One IMU sample, in the right controller's IMU axes (after `left_to_right_frame`), bias removed:
-/// accel 1024 LSB/g, gyro 8.192 LSB/(deg/s); `ts` the controller's µs timestamp.
-pub fn imu(side: Side, accel: [i16; 3], gyro: [i16; 3], ts: u32) {
+/// One IMU sample, in the right controller's IMU axes (after `left_to_right_frame`): accel 1024
+/// LSB/g; gyro 8.192 LSB/(deg/s) with the exact (fractional) resting offset removed; `ts` the
+/// controller's µs timestamp.
+pub fn imu(side: Side, accel: [i16; 3], gyro: [f32; 3], ts: u32) {
     let (gyro, accel) = to_openxr(gyro, accel);
     const G: f32 = 9.80665;
     const GYRO_SCALE: f32 = core::f32::consts::PI / 180.0 / 8.192;
     const ACCEL_SCALE: f32 = G / 1024.0;
-    let w = gyro.map(|v| v as f32 * GYRO_SCALE);
+    let w = gyro.map(|v| v * GYRO_SCALE);
     let a = accel.map(|v| v as f32 * ACCEL_SCALE);
     let f = fusion(side);
     let req = REQUESTS[side as usize].swap(0, Ordering::Relaxed);
@@ -289,13 +290,13 @@ pub fn publish(side: Side, inp: &Input) {
 
 /// Controller IMU (right controller's axes) -> OpenXR controller frame, with the DS4 axis map
 /// from settings (x right, y up, z toward the user for a controller held naturally).
-fn to_openxr(gyro: [i16; 3], accel: [i16; 3]) -> ([i16; 3], [i16; 3]) {
+fn to_openxr(gyro: [f32; 3], accel: [i16; 3]) -> ([f32; 3], [i16; 3]) {
     let m = crate::settings::get().imu_map;
-    let pick = |v: &[i16; 3], i: usize| {
-        let x = v[((m[i] & 0x03) as usize).min(2)];
-        if m[i] & 0x80 != 0 { x.saturating_neg() } else { x }
-    };
-    ([pick(&gyro, 0), pick(&gyro, 1), pick(&gyro, 2)], [pick(&accel, 0), pick(&accel, 1), pick(&accel, 2)])
+    let axis = |i: usize| ((m[i] & 0x03) as usize).min(2);
+    let neg = |i: usize| m[i] & 0x80 != 0;
+    let g = |i: usize| if neg(i) { -gyro[axis(i)] } else { gyro[axis(i)] };
+    let a = |i: usize| if neg(i) { accel[axis(i)].saturating_neg() } else { accel[axis(i)] };
+    ([g(0), g(1), g(2)], [a(0), a(1), a(2)])
 }
 
 // ---- orientation fusion ----

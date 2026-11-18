@@ -321,6 +321,7 @@ pub fn link_notifications(slot: u8, mut buf: &[u8]) {
                     accel = left_to_right_frame(accel);
                     gyro = left_to_right_frame(gyro);
                 }
+                let raw_gyro = gyro;
                 if let Some(side) = h.side {
                     let r = rest(side);
                     r.add(accel, gyro);
@@ -328,7 +329,11 @@ pub fn link_notifications(slot: u8, mut buf: &[u8]) {
                 }
                 h.imu = Imu { ts: u32::from_le_bytes([d[0], d[1], d[2], d[3]]), accel, gyro };
                 if let (Some(side), true) = (h.side, crate::vr::enabled()) {
-                    crate::vr::imu(side, accel, gyro, h.imu.ts);
+                    // The fusion integrates the gyro, so it takes the exact (fractional) offset: the
+                    // whole-count one leaves up to 0.06 °/s, a few degrees of yaw drift per minute.
+                    let exact = rest(side).offset_exact;
+                    let g = [0, 1, 2].map(|i| raw_gyro[i] as f32 - exact[i]);
+                    crate::vr::imu(side, accel, g, h.imu.ts);
                 }
                 if h.imu.gyro.iter().any(|g| (*g as i32).abs() > STILL_GYRO) {
                     activity()[slot].moving = true;
@@ -408,6 +413,8 @@ const MAX_OFFSET: i32 = 41 * REST_SAMPLES; // block sums: 5 °/s, anything stead
 struct Rest {
     /// Gyro offset, counts, in the right controller's axes (after `left_to_right_frame`).
     offset: [i16; 3],
+    /// The same offset unrounded (counts), for the VR orientation fusion.
+    offset_exact: [f32; 3],
     /// `offset` has been measured at least once since power-up.
     learned: bool,
     n: i32,
@@ -418,7 +425,7 @@ struct Rest {
     prev: Option<[i32; 6]>,
 }
 
-const REST: Rest = Rest { offset: [0; 3], learned: false, n: 0, lo: [i16::MAX; 6], hi: [i16::MIN; 6], sum: [0; 6], prev: None };
+const REST: Rest = Rest { offset: [0; 3], offset_exact: [0.0; 3], learned: false, n: 0, lo: [i16::MAX; 6], hi: [i16::MIN; 6], sum: [0; 6], prev: None };
 
 /// Per hand (only touched from the radio-side interrupts, like `HANDS`).
 static mut RESTS: [Rest; 2] = [REST; 2];
@@ -448,11 +455,12 @@ impl Rest {
                     // Mean of the two blocks, rounded to the nearest count.
                     let s = self.sum[3 + i] + prev[3 + i];
                     self.offset[i] = ((s + s.signum() * REST_SAMPLES) / (2 * REST_SAMPLES)) as i16;
+                    self.offset_exact[i] = s as f32 / (2 * REST_SAMPLES) as f32;
                 }
                 self.learned = true;
             }
         }
-        *self = Rest { offset: self.offset, learned: self.learned, prev: if still { Some(self.sum) } else { None }, ..REST };
+        *self = Rest { offset: self.offset, offset_exact: self.offset_exact, learned: self.learned, prev: if still { Some(self.sum) } else { None }, ..REST };
     }
 }
 
