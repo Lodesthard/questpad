@@ -22,7 +22,7 @@ jobs:
         run: cargo run --release --manifest-path sim/Cargo.toml -- test
       - name: Build firmware and package
         run: tools/package.sh
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v6
         with:
           name: questpad
           path: dist/*.zip
