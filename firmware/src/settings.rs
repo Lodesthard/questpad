@@ -30,6 +30,9 @@ pub enum Mode {
     Ds4 = 1,
     /// Wired Xbox 360 (XInput on Windows, `xpad` on Linux). No serial port in this mode.
     XInput = 2,
+    /// Two 3DoF VR controllers (vendor interfaces for an OpenXR runtime such as a Monado fork,
+    /// see vr.rs) + serial port.
+    Vr = 3,
 }
 
 impl Mode {
@@ -37,11 +40,12 @@ impl Mode {
         match v {
             1 => Mode::Ds4,
             2 => Mode::XInput,
+            3 => Mode::Vr,
             _ => Mode::Hid,
         }
     }
     pub fn next(self) -> Mode {
-        Mode::from((self as u8 + 1) % 3)
+        Mode::from((self as u8 + 1) % 4)
     }
 }
 

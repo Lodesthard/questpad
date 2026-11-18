@@ -12,6 +12,7 @@ mod radio;
 mod selfupdate;
 mod settings;
 mod ui;
+mod vr;
 mod wdt;
 mod xinput;
 
@@ -164,6 +165,17 @@ async fn xinput_in_task(ep: usb::Endpoint<'static, usb::In>) -> ! {
 #[embassy_executor::task]
 async fn xinput_out_task(ep: usb::Endpoint<'static, usb::Out>) -> ! {
     xinput::run_out(ep).await
+}
+
+/// VR mode: one state stream and one command endpoint per controller.
+#[embassy_executor::task(pool_size = 2)]
+async fn vr_in_task(side: gamepad::Side, ep: usb::Endpoint<'static, usb::In>) -> ! {
+    vr::run_in(side, ep).await
+}
+
+#[embassy_executor::task(pool_size = 2)]
+async fn vr_out_task(side: gamepad::Side, ep: usb::Endpoint<'static, usb::Out>) -> ! {
+    vr::run_out(side, ep).await
 }
 
 #[embassy_executor::task]
@@ -499,6 +511,7 @@ async fn main(spawner: Spawner) {
 
     wdt::start();
     let mode = settings::load().mode;
+    vr::ENABLED.store(mode == settings::Mode::Vr, core::sync::atomic::Ordering::Relaxed);
     radio::init();
     start_stored_link();
 
@@ -529,10 +542,15 @@ async fn main(spawner: Spawner) {
         settings::Mode::Ds4 => (ds4::VID, ds4::PID, "Sony Interactive Entertainment", "Wireless Controller"),
         settings::Mode::XInput => (xinput::VID, xinput::PID, "QuestPad", "QuestPad (XInput mode)"),
         settings::Mode::Hid => (0x1209, 0x5151, "QuestPad", "QuestPad"),
+        // Same ids as HID mode (bcdDevice 3.00 and the interface classes tell them apart).
+        settings::Mode::Vr => (0x1209, 0x5151, "QuestPad", "QuestPad VR"),
     };
     let mut ucfg = embassy_usb::Config::new(vid, pid);
     if mode == settings::Mode::XInput {
         xinput::configure(&mut ucfg);
+    }
+    if mode == settings::Mode::Vr {
+        vr::configure(&mut ucfg);
     }
     ucfg.manufacturer = Some(manufacturer);
     ucfg.product = Some(product);
@@ -542,7 +560,7 @@ async fn main(spawner: Spawner) {
 
     static CONFIG_DESC: StaticCell<[u8; 256]> = StaticCell::new();
     static BOS_DESC: StaticCell<[u8; 256]> = StaticCell::new();
-    static MSOS_DESC: StaticCell<[u8; 128]> = StaticCell::new();
+    static MSOS_DESC: StaticCell<[u8; 512]> = StaticCell::new(); // VR mode: WinUSB descriptors for 2 functions
     static CONTROL_BUF: StaticCell<[u8; 128]> = StaticCell::new();
     static CDC_STATE: StaticCell<State> = StaticCell::new();
     static HID_STATE: StaticCell<hid::State> = StaticCell::new();
@@ -552,7 +570,7 @@ async fn main(spawner: Spawner) {
         ucfg,
         CONFIG_DESC.init([0; 256]),
         BOS_DESC.init([0; 256]),
-        MSOS_DESC.init([0; 128]),
+        MSOS_DESC.init([0; 512]),
         CONTROL_BUF.init([0; 128]),
     );
     static USB_EVENTS: StaticCell<UsbEvents> = StaticCell::new();
@@ -585,6 +603,15 @@ async fn main(spawner: Spawner) {
             spawner.spawn(ds4_task(pad_tx).unwrap());
             spawner.spawn(ds4_out_task(pad_rx).unwrap());
             Some(class)
+        }
+        settings::Mode::Vr => {
+            // The two controller interfaces first (0 left, 1 right), then the serial port.
+            let eps = vr::build(&mut builder);
+            spawner.spawn(vr_in_task(gamepad::Side::Left, eps.left_in).unwrap());
+            spawner.spawn(vr_out_task(gamepad::Side::Left, eps.left_out).unwrap());
+            spawner.spawn(vr_in_task(gamepad::Side::Right, eps.right_in).unwrap());
+            spawner.spawn(vr_out_task(gamepad::Side::Right, eps.right_out).unwrap());
+            Some(CdcAcmClass::new(&mut builder, CDC_STATE.init(State::new()), 64))
         }
         _ => {
             let class = CdcAcmClass::new(&mut builder, CDC_STATE.init(State::new()), 64);

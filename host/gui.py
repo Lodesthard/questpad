@@ -44,6 +44,9 @@ MODE_HELP = {
     2: "XInput (Xbox 360 controller): native in Windows games, also Linux and macOS. No gyro, and no motion for "
        "emulators. This app can't reach the dongle in this mode: to leave it, hold Oculus / Menu with the trigger "
        "pulled for 5 s, or the dongle's button for 3 s.",
+    3: "VR (two 3DoF controllers): for an OpenXR runtime such as a Monado fork on an Android phone, with the "
+       "dongle plugged into the phone. Each controller is its own device with orientation, buttons, stick, "
+       "trigger, grip and haptics. Not a gamepad. Setup: docs/vr.md.",
 }
 MOTION_OFF = ("Off. Emulators that take a DSU (Cemuhook) controller, like Cemu, Dolphin and Ryujinx, can use "
               "each controller's gyro. Setup: docs/motion.md.")
@@ -225,12 +228,12 @@ class App:
         md = ttk.LabelFrame(main, text="Mode", padding=6)
         md.pack(fill="x", **pad)
         self.mode_var = tk.IntVar(value=0)
-        for i, name in enumerate(("HID gamepad", "DS4 (Steam, gyro)", "XInput (Xbox 360)")):
+        for i, name in enumerate(("HID gamepad", "DS4 (Steam, gyro)", "XInput (Xbox 360)", "VR (3DoF, Monado)")):
             ttk.Radiobutton(md, text=name, value=i, variable=self.mode_var, command=self._mode_help).grid(
                 row=0, column=i, sticky="w", padx=4)
-        ttk.Button(md, text="Switch", command=self._apply_mode).grid(row=0, column=3, padx=8)
+        ttk.Button(md, text="Switch", command=self._apply_mode).grid(row=0, column=4, padx=8)
         self.mode_help = tk.StringVar(value=MODE_HELP[0])
-        ttk.Label(md, textvariable=self.mode_help, wraplength=520).grid(row=1, column=0, columnspan=4, sticky="w",
+        ttk.Label(md, textvariable=self.mode_help, wraplength=520).grid(row=1, column=0, columnspan=5, sticky="w",
                                                                        pady=(4, 0))
 
         # Settings
@@ -462,7 +465,7 @@ class App:
         if mode == 2 and not messagebox.askyesno(
                 "XInput mode", "In XInput mode this app can't talk to the dongle. To come back, hold Oculus or "
                                "Menu with the trigger pulled all the way for 5 seconds, or the dongle's button for "
-                               "3 seconds (both cycle HID -> DS4 -> XInput). Switch now?"):
+                               "3 seconds (both cycle HID -> DS4 -> XInput -> VR). Switch now?"):
             return
         new = dict(self.settings, mode=mode)
         self.worker.call(lambda b: b.settings_set(new))

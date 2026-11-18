@@ -19,6 +19,8 @@ Quest controllers work with headsets over a private 2.4 GHz radio link. QuestPad
 - **Gyro with touch-to-aim** (DS4 mode): rest your thumb on the controller to aim, lift it to re-centre.
 - **Motion in emulators**: Cemu, Dolphin, Ryujinx and other DSU (Cemuhook) emulators get each controller's gyro and
   accelerometer from the control panel. [Setup](docs/motion.md).
+- **VR mode**: both controllers as separate 3DoF controllers (orientation, inputs, haptics) for an OpenXR runtime,
+  e.g. a Monado fork on an Android phone with the dongle plugged into it. [Protocol and setup](docs/vr.md).
 - **Rumble**, plus small buzzes when a controller connects and when its battery runs low.
 - **Pair with one button press** on the dongle; no computer needed. 
 - **An off switch the controllers never had**: hold Oculus or Menu for 3 s, put them down, and they switch off after about a second.
@@ -83,10 +85,11 @@ By default only the gyro controller's thumb counts, so the other thumb never int
 | Generic gamepad | green | anything that takes a USB gamepad; Steam asks you to map the buttons once |
 | DS4 (PlayStation 4) | blue | **Steam**, SDL games, emulators, macOS, Linux: no setup, gyro, rumble, battery |
 | XInput (Xbox 360) | purple | If you don't need gyro this is recommended |
+| VR (3DoF) | orange | an OpenXR runtime (Monado fork on Android): two separate tracked controllers, no gamepad. [docs/vr.md](docs/vr.md) |
 
 Switch in the panel, by holding the dongle's button for 3 s, or from a controller: hold **Oculus** or **Menu** with
 the **trigger pulled all the way** for 5 s, until it buzzes. Both step through the modes in the above order, so from
-XInput the next one is generic gamepad, where the panel can reach the dongle again.
+XInput the next one is VR, then generic gamepad; the panel can reach the dongle in every mode but XInput.
 
 **The dongle's light.**
 | light | meaning |
@@ -132,7 +135,7 @@ between **P1.06** and **GND** and it works like the dongle's.
 | fast blink | pairing |
 | double blink | not paired yet |
 | three quick flashes / one long flash | pairing worked / failed |
-| 1 / 2 / 3 blinks at power-up | generic gamepad / DS4 / XInput mode |
+| 1 / 2 / 3 / 4 blinks at power-up | generic gamepad / DS4 / XInput / VR mode |
 
 ## Troubleshooting
 **Steam asks me to set up the controller.** That's the generic gamepad mode. Switch to DS4 mode and Steam

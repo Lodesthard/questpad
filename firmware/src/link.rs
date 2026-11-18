@@ -428,6 +428,11 @@ pub fn rumble(left: u8, right: u8) {
     critical_section::with(|_| link().rumble = [left, right])
 }
 
+/// Set the haptic amplitude (0 = off) of one controller, leaving the other's alone.
+pub fn rumble_side(right: bool, amp: u8) {
+    critical_section::with(|_| link().rumble[right as usize] = amp)
+}
+
 /// Queue a register write (or read, answered in an uplink) for the device in `slot`.
 pub fn request(slot: u8, reg: u8, read: bool, data: &[u8]) -> bool {
     critical_section::with(|_| {

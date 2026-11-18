@@ -9,7 +9,7 @@ RADIO = 0x40001000
 FREQUENCY, TXPOWER, MODE, PCNF0, PCNF1 = 0x508, 0x50C, 0x510, 0x514, 0x518
 BASE0, BASE1, PREFIX0, PREFIX1, TXADDRESS, RXADDRESSES = 0x51C, 0x520, 0x524, 0x528, 0x52C, 0x530
 
-# USB ids the dongle firmware uses: HID mode, DS4 mode (XInput mode has no serial port).
+# USB ids the dongle firmware uses: HID and VR modes, DS4 mode (XInput mode has no serial port).
 HID_IDS = [(0x1209, 0x5151), (0x1209, 0x0001)]  # 0x0001 = firmware 1.0.0
 DONGLE_IDS = {*HID_IDS, (0x054C, 0x09CC)}
 
@@ -248,7 +248,7 @@ class Bridge:
                 "imu_map_z", "touch_left", "touch_right", "touch_both",
                 "touch_hold_10ms",  # touch_*: firmware 1.1.0+
                 "touch_pct")  # 1.2.0+
-    MODES = ("HID", "DS4", "XInput")
+    MODES = ("HID", "DS4", "XInput", "VR")  # VR: firmware after 1.3.0
     STATUS_DEAD_BATTERY, STATUS_STANDBY = 0x01, 0x10  # controller status flags (status()["flags"])
     PAIR_STATES = ("idle", "waiting", "writing", "done", "failed", "timed out", "cancelled")
 
@@ -276,7 +276,7 @@ class Bridge:
         ctl = [(f[i], "right" if f[i + 1] else "left", None if f[i + 2] == 255 else f[i + 2])
                for i in range(5, 5 + 3 * n, 3)]
         flags = dict(zip((c[0] for c in ctl), f[5 + 3 * n : 5 + 4 * n])) if len(f) >= 5 + 4 * n else {}
-        return dict(mode=cls.MODES[f[1]] if f[1] < 3 else f[1], paired=bool(f[2]),
+        return dict(mode=cls.MODES[f[1]] if f[1] < len(cls.MODES) else f[1], paired=bool(f[2]),
                     pair_state=cls.PAIR_STATES[f[3]] if f[3] < 7 else f[3], controllers=ctl, flags=flags)
 
     def pair_start(self):

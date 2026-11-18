@@ -256,11 +256,21 @@ fn hands() -> &'static mut [Hand; 5] {
 pub fn link_join(slot: u8, dev_type: u32) {
     let side = if dev_type & 0x1_0000 != 0 { Side::Right } else { Side::Left };
     hands()[slot as usize] = Hand { side: Some(side), ..IDLE };
+    if crate::vr::enabled() {
+        crate::vr::joined(side);
+    }
     publish();
 }
 
 pub fn link_drop(slot: u8) {
+    let side = hands()[slot as usize].side;
     hands()[slot as usize] = IDLE;
+    if let (Some(side), true) = (side, crate::vr::enabled()) {
+        // Another controller of the same hand may still be connected: it keeps reporting.
+        if !hands().iter().any(|h| h.side == Some(side)) {
+            crate::vr::dropped(side);
+        }
+    }
     publish();
 }
 
@@ -317,6 +327,9 @@ pub fn link_notifications(slot: u8, mut buf: &[u8]) {
                     gyro = [0, 1, 2].map(|i| gyro[i].saturating_sub(r.offset[i]));
                 }
                 h.imu = Imu { ts: u32::from_le_bytes([d[0], d[1], d[2], d[3]]), accel, gyro };
+                if let (Some(side), true) = (h.side, crate::vr::enabled()) {
+                    crate::vr::imu(side, accel, gyro, h.imu.ts);
+                }
                 if h.imu.gyro.iter().any(|g| (*g as i32).abs() > STILL_GYRO) {
                     activity()[slot].moving = true;
                 }
@@ -356,6 +369,22 @@ pub fn link_notifications(slot: u8, mut buf: &[u8]) {
         }
         buf = &buf[2 + len..];
     }
+    if let (Some(side), true) = (h.side, crate::vr::enabled()) {
+        crate::vr::publish(
+            side,
+            &crate::vr::Input {
+                buttons: h.buttons,
+                touch: h.touch,
+                stick: h.stick,
+                trigger: h.trigger,
+                grip: h.grip,
+                battery: h.battery,
+                status: h.status,
+                imu_ts: h.imu.ts,
+                gyro_calibrated: rest(side).learned,
+            },
+        );
+    }
     if changed {
         publish();
     }
@@ -379,6 +408,8 @@ const MAX_OFFSET: i32 = 41 * REST_SAMPLES; // block sums: 5 °/s, anything stead
 struct Rest {
     /// Gyro offset, counts, in the right controller's axes (after `left_to_right_frame`).
     offset: [i16; 3],
+    /// `offset` has been measured at least once since power-up.
+    learned: bool,
     n: i32,
     lo: [i16; 6],
     hi: [i16; 6],
@@ -387,7 +418,7 @@ struct Rest {
     prev: Option<[i32; 6]>,
 }
 
-const REST: Rest = Rest { offset: [0; 3], n: 0, lo: [i16::MAX; 6], hi: [i16::MIN; 6], sum: [0; 6], prev: None };
+const REST: Rest = Rest { offset: [0; 3], learned: false, n: 0, lo: [i16::MAX; 6], hi: [i16::MIN; 6], sum: [0; 6], prev: None };
 
 /// Per hand (only touched from the radio-side interrupts, like `HANDS`).
 static mut RESTS: [Rest; 2] = [REST; 2];
@@ -418,9 +449,10 @@ impl Rest {
                     let s = self.sum[3 + i] + prev[3 + i];
                     self.offset[i] = ((s + s.signum() * REST_SAMPLES) / (2 * REST_SAMPLES)) as i16;
                 }
+                self.learned = true;
             }
         }
-        *self = Rest { offset: self.offset, prev: if still { Some(self.sum) } else { None }, ..REST };
+        *self = Rest { offset: self.offset, learned: self.learned, prev: if still { Some(self.sum) } else { None }, ..REST };
     }
 }
 

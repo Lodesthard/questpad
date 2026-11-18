@@ -189,14 +189,16 @@ Nordic's Open USB DFU bootloader. The `nicenano` cargo feature builds for the ni
 | `radio.rs` | radio driver and the pairing-mode (DM) engine |
 | `gamepad.rs` | controller data → one pad state; HID mode report; power-off and mode gestures, idle timer |
 | `ds4.rs`, `xinput.rs` | DS4 and Xbox 360 modes (descriptor / layout from GP2040-CE) |
+| `vr.rs` | VR mode: two 3DoF controller interfaces for an OpenXR runtime (orientation fusion, reports, haptics) |
 | `ui.rs` | status LED, button, pairing from the dongle |
 | `board.rs` | what differs per board (pins are taken in `main.rs`, flash layouts are `memory-<board>.x`) |
 | `settings.rs`, `pairing.rs` | settings (flash `0xDE000`) and the pairing record (flash `0xDF000`) |
 | `selfupdate.rs`, `wdt.rs` | in-place firmware updates, watchdog |
 | `main.rs` | USB setup per mode, and the serial protocol the control panel uses (command list at the top) |
 
-**USB modes.** Generic gamepad + serial port (`1209:5151`; firmware 1.0.0 used the pid.codes test id `1209:0001`), DS4 (`054C:09CC`, gamepad + serial port), and XInput
-(`045E:028E`, Xbox 360 interfaces only, so no serial port). DS4 mode reports gyro at 16.384 per °/s (the controller's
+**USB modes.** Generic gamepad + serial port (`1209:5151`; firmware 1.0.0 used the pid.codes test id `1209:0001`), DS4 (`054C:09CC`, gamepad + serial port), XInput
+(`045E:028E`, Xbox 360 interfaces only, so no serial port), and VR (`1209:5151` with bcdDevice 0x0300: one vendor
+interface per controller + serial port; protocol in [docs/vr.md](docs/vr.md)). DS4 mode reports gyro at 16.384 per °/s (the controller's
 8.192, doubled) and accel at 8192 per g and says so in its calibration report, so hosts scale it correctly (before 1.3.0
 the report claimed 16 per °/s, so turns read 2.4 % large). The left controller's IMU is mounted rotated 90°
 about Z from the right's (left X = right Y, left Y = −right X, Z the same; measured with both at rest in two poses), so

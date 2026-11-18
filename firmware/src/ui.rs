@@ -2,9 +2,9 @@
 //!
 //! RGB LED (PCA10059 LED2): red = not paired; fast blue blink = pairing (waiting for a
 //! controller in pairing mode); mode colour slow pulse = waiting for controllers, solid = connected
-//! (HID green, DS4 blue, XInput purple); triple green / red flash = pairing worked / failed.
+//! (HID green, DS4 blue, XInput purple, VR orange); triple green / red flash = pairing worked / failed.
 //! One-colour LED (nice!nano): the same patterns, except not paired = double blink, pairing failed
-//! = one long flash, and the mode shows as 1 / 2 / 3 blinks (HID / DS4 / XInput) at power-up.
+//! = one long flash, and the mode shows as 1 / 2 / 3 / 4 blinks (HID / DS4 / XInput / VR) at power-up.
 //! Button (SW1): press = pair a controller (press again to cancel); hold 3 s = next USB mode
 //! (reboots); hold 10 s = forget the pairing. The controllers' mode gesture (gamepad.rs) also
 //! steps to the next mode.
@@ -200,6 +200,7 @@ fn mode_color(m: Mode) -> (u16, u16, u16) {
         Mode::Hid => (0, 450, 0),
         Mode::Ds4 => (0, 0, 1000),
         Mode::XInput => (1000, 0, 1000),
+        Mode::Vr => (1000, 350, 0),
     }
 }
 
