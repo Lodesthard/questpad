@@ -112,7 +112,13 @@ questpad_vr_f32(const uint8_t *p)
 static inline float
 questpad_vr_clampf(float v, float lo, float hi)
 {
-	return v < lo ? lo : (v > hi ? hi : v);
+	if (v < lo) {
+		return lo;
+	}
+	if (v > hi) {
+		return hi;
+	}
+	return v;
 }
 
 /*!

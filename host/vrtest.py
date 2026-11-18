@@ -74,14 +74,16 @@ def open_dongle():
     dev = usb.core.find(idVendor=VID, idProduct=PID, backend=backend)
     if dev is None:
         sys.exit("dongle not found (is it in VR mode?)")
+    def endpoint(intf, direction):
+        return usb.util.find_descriptor(
+            intf, custom_match=lambda e: usb.util.endpoint_direction(e.bEndpointAddress) == direction)
+
     cfg = dev.get_active_configuration()
     ifaces = {}
     for intf in cfg:
         if intf.bInterfaceClass == 0xFF and intf.bInterfaceSubClass == SUBCLASS and intf.bInterfaceProtocol in SIDES:
-            ep_in = usb.util.find_descriptor(intf, custom_match=lambda e: usb.util.endpoint_direction(e.bEndpointAddress)
-                                             == usb.util.ENDPOINT_IN)
-            ep_out = usb.util.find_descriptor(intf, custom_match=lambda e: usb.util.endpoint_direction(e.bEndpointAddress)
-                                              == usb.util.ENDPOINT_OUT)
+            ep_in = endpoint(intf, usb.util.ENDPOINT_IN)
+            ep_out = endpoint(intf, usb.util.ENDPOINT_OUT)
             try:
                 if dev.is_kernel_driver_active(intf.bInterfaceNumber):
                     dev.detach_kernel_driver(intf.bInterfaceNumber)
@@ -99,9 +101,9 @@ def main():
     ap.add_argument("--buzz", choices=("left", "right"), help="buzz one controller for 200 ms")
     ap.add_argument("--recenter", action="store_true", help="make both controllers' current heading yaw 0")
     args = ap.parse_args()
-    import usb.core
-
     dev, ifaces = open_dongle()
+    import usb.core  # after open_dongle(), which explains how to install pyusb if it is missing
+
     if args.buzz:
         ifaces[args.buzz][1].write(struct.pack("<BBH", 0x10, 200, 200))
         return
@@ -111,7 +113,8 @@ def main():
         return
     state = {side: None for side in ifaces}
     rate = {side: 0 for side in ifaces}
-    last_print, last_seq, counts = 0.0, {}, {side: 0 for side in ifaces}
+    counts = {side: 0 for side in ifaces}  # new reports (sequence number changed) since the last print
+    last_print = 0.0
     while True:
         for side, (ep_in, _) in ifaces.items():
             try:
@@ -119,9 +122,8 @@ def main():
             except usb.core.USBTimeoutError:
                 continue
             if s:
-                if last_seq.get(side) != s["seq"]:
+                if state[side] is None or state[side]["seq"] != s["seq"]:
                     counts[side] += 1
-                last_seq[side] = s["seq"]
                 state[side] = s
         now = time.monotonic()
         if now - last_print >= 0.1:
@@ -130,7 +132,10 @@ def main():
                 rate[side], counts[side] = counts[side] / dt, 0
             last_print = now
             out = "  |  ".join(f"{line(side, state[side])}  {rate[side]:4.0f} Hz" for side in sorted(ifaces))
-            print("\r" + out, end="", flush=True) if len(ifaces) == 1 else print(out)
+            if len(ifaces) == 1:
+                print("\r" + out, end="", flush=True)
+            else:
+                print(out)
 
 
 if __name__ == "__main__":

@@ -209,13 +209,19 @@ pub struct Input {
     pub imu_scale_reported: bool,
 }
 
-fn disconnected_report(side: Side, seq: u8) -> [u8; REPORT_LEN] {
+/// A state report with its header filled in: type, version, `flags`, `seq`, dongle timestamp.
+fn new_report(flags: u8, seq: u8) -> [u8; REPORT_LEN] {
     let mut r = [0u8; REPORT_LEN];
     r[0] = REPORT_STATE;
     r[1] = PROTOCOL_VERSION;
-    r[2] = if side == Side::Right { FLAG_RIGHT } else { 0 };
+    r[2] = flags;
     r[3] = seq;
     r[8..12].copy_from_slice(&now_us().to_le_bytes());
+    r
+}
+
+fn disconnected_report(side: Side, seq: u8) -> [u8; REPORT_LEN] {
+    let mut r = new_report(if side == Side::Right { FLAG_RIGHT } else { 0 }, seq);
     // Identity orientation.
     r[24..28].copy_from_slice(&1.0f32.to_le_bytes());
     r[62] = 255;
@@ -240,7 +246,6 @@ pub fn dropped(side: Side) {
 /// controller's µs timestamp; `rest_epoch` changes whenever `gamepad::Rest` measures a new offset.
 pub fn imu(side: Side, accel: [f32; 3], gyro: [f32; 3], ts: u32, rest_epoch: u16) {
     let (gyro, accel) = to_openxr(gyro, accel);
-    const G: f32 = 9.80665;
     const GYRO_SCALE: f32 = core::f32::consts::PI / 180.0 / 8.192;
     const ACCEL_SCALE: f32 = G / 1024.0;
     let w = gyro.map(|v| v * GYRO_SCALE);
@@ -270,9 +275,6 @@ pub fn imu(side: Side, accel: [f32; 3], gyro: [f32; 3], ts: u32, rest_epoch: u16
 pub fn publish(side: Side, inp: &Input) {
     let f = fusion(side);
     f.seq = f.seq.wrapping_add(1);
-    let mut r = [0u8; REPORT_LEN];
-    r[0] = REPORT_STATE;
-    r[1] = PROTOCOL_VERSION;
     let mut flags = FLAG_CONNECTED;
     let set = |flags: &mut u8, on: bool, bit: u8| {
         if on {
@@ -287,10 +289,8 @@ pub fn publish(side: Side, inp: &Input) {
     set(&mut flags, f.fresh, FLAG_IMU_FRESH);
     set(&mut flags, inp.imu_scale_reported, FLAG_IMU_SCALE);
     f.fresh = false;
-    r[2] = flags;
-    r[3] = f.seq;
+    let mut r = new_report(flags, f.seq);
     r[4..8].copy_from_slice(&inp.imu_ts.to_le_bytes());
-    r[8..12].copy_from_slice(&now_us().to_le_bytes());
     // Internal order w, x, y, z -> wire order x, y, z, w.
     let q = if f.init { f.q } else { [1.0, 0.0, 0.0, 0.0] };
     for (i, v) in [q[1], q[2], q[3], q[0]].iter().enumerate() {
@@ -325,6 +325,8 @@ fn to_openxr(gyro: [f32; 3], accel: [f32; 3]) -> ([f32; 3], [f32; 3]) {
 
 // ---- orientation fusion ----
 
+/// Standard gravity, m/s².
+const G: f32 = 9.80665;
 /// Proportional gain pulling the tilt toward gravity, rad/s per unit of error (~2 s time constant).
 const KP: f32 = 0.5;
 /// Integral gain: learns the gyro bias from the same gravity error (rad/s² per unit of error).
@@ -386,7 +388,6 @@ fn fusion(side: Side) -> &'static mut Fusion {
 
 impl Fusion {
     fn update(&mut self, a: [f32; 3], w: [f32; 3], ts: u32) {
-        const G: f32 = 9.80665;
         let an = norm(a);
         if !self.init {
             // Start level with gravity, facing world -Z.
@@ -433,14 +434,16 @@ impl Fusion {
     fn recenter(&mut self) {
         let f = rotate(self.q, [0.0, 0.0, -1.0]);
         let len = sqrt(f[0] * f[0] + f[2] * f[2]);
-        if len < 0.2 {
+        let heading = if len < 0.2 {
             // Pointing (almost) straight up or down: the heading is undefined, use the top (+Y),
             // which faces away from the user when pointing down and toward them when pointing up.
             let u = rotate(self.q, [0.0, 1.0, 0.0]);
             let s = if f[1] < 0.0 { 1.0 } else { -1.0 };
-            return self.apply_heading([s * u[0], 0.0, s * u[2]]);
-        }
-        self.apply_heading(f);
+            [s * u[0], 0.0, s * u[2]]
+        } else {
+            f
+        };
+        self.apply_heading(heading);
     }
 
     /// Rotate about world Y so the horizontal direction `f` maps to world -Z.
