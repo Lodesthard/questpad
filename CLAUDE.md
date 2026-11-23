@@ -4,7 +4,9 @@
 - `cd firmware && cargo build --release` (+ `--features nicenano`) - firmware, target thumbv7em-none-eabihf; build both boards after firmware changes, zero warnings expected
 - `sh tools/package.sh` - builds both boards + `firmware/target/questpad.bin`, `questpad-nicenano.uf2`, `dist/*.zip`
 - `python host/mapping.py` - host self-test (CI runs it)
-- `python host/vrtest.py` - VR-mode check window on real hardware (needs pyusb + libusb-package, dongle in VR mode); `--sim` reads sim live, `--text` terminal
+- `python host/vrtest.py` - VR-mode check window on real hardware (needs pyusb + libusb-package, dongle in VR mode); `--sim` reads sim live, `--text` terminal; non-interactive check: `timeout 8 python -u host/vrtest.py --text` (`-u` or the output is lost when timeout kills it)
+- Serial tools (bridge.py, link.py, regs.py) fail with `PermissionError` on the COM port while the control panel holds it; vrtest.py uses the VR vendor interfaces and coexists with the panel
+- nice!nano: `firmware/flash.sh --nicenano`, or `python host/uf2.py firmware/target/questpad-nicenano.uf2` (finds the NICENANO drive by Board-ID, or reboots a running QuestPad into it)
 - Pure refactor of firmware? Prove it: `llvm-objcopy -O binary` the ELF and `cmp` with the previous `firmware/target/questpad.bin` (hw.rs / wdt.rs moves were byte-identical; moving code between modules can change inlining)
 
 ## Simulator (sim/)
@@ -27,10 +29,13 @@
 - MS OS 2.0 descriptors: `MSOS_DESC` buffer in main.rs must fit all WinUSB functions (~170 B each)
 - New `settings::Mode` variant: update `Mode::from`/`next`, `ui::mode_color`, main.rs USB match, `host/bridge.py` MODES, `host/gui.py` radio + MODE_HELP
 - `host/dsu.py` `Rest` duplicates `gamepad.rs` `Rest` (same thresholds) - change both together
+- Tk canvas UIs (vrtest.py): fonts follow display scaling but canvas coordinates don't: multiply offsets by `root.winfo_fpixels("1i") / 96`; cap window size to the screen
+- bridge.py falls back to the bundled pyserial in host/vendor, so every host tool runs standalone
 
 ## Protocol contracts
 - VR report layout (docs/vr.md) is shared with `monado/questpad_vr.h` and sim/src/report.rs: change all + bump protocol version byte (new flag bits in unused positions don't need a bump)
 - Serial CMD_*/EV_* opcodes in `serial.rs` mirror `host/bridge.py`
+- Right after a host opens the VR endpoints, the first 1-2 IN reports are stale (endpoint buffer + `vr::REPORTS` Signal): ignore seq gaps when `dongle_ts` jumps >100 ms (vrtest.py `Stats.feed`)
 
 ## Repo
 - Fork: origin = Lodesthard/questpad, upstream = Jakey-Jakey/questpad
