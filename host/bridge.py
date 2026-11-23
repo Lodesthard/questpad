@@ -1,9 +1,14 @@
 """Host side of the dongle's raw radio bridge (USB CDC, COBS-framed)."""
 import os
 import struct
+import sys
 import time
 
-import serial
+try:
+    import serial
+except ImportError:  # not installed: use the copy bundled in host/vendor (as gui.py does)
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "vendor"))
+    import serial
 import serial.tools.list_ports
 
 RADIO = 0x40001000

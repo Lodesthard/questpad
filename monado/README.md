@@ -173,7 +173,8 @@ python host/vrsim_view.py              # vue 3D (à lancer depuis la racine) : o
 ## 7. Vérifier sur PC avec le vrai dongle
 ```sh
 pip install pyusb libusb-package
-python host/vrtest.py               # orientation + entrées des deux manettes en direct
+python host/vrtest.py               # fenêtre : orientation 3D, stats du gyro et des rapports, entrées
+python host/vrtest.py --sim         # pareil avec le simulateur (sans matériel)
 python host/vrtest.py --buzz right  # test vibration
 python host/vrtest.py --recenter
 ```

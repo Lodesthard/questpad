@@ -30,18 +30,29 @@ If the controllers switch off whenever the phone's screen goes off, the phone is
 *Turn controllers off when the computer sleeps* in the control panel's settings (the dongle remembers it).
 
 ### Checking it on a PC
-`host/vrtest.py` reads both controllers the way a runtime does and prints their orientation and inputs:
+`host/vrtest.py` reads both controllers the way a runtime does. It opens a window with each controller in 3D and,
+under it, what tells whether the gyro works: yaw / pitch / roll, the flags (orientation, gyro calibrated, IMU units),
+gyro rates and acceleration (|a| reads 1.00 g at rest), the yaw drift measured while the controller lies still,
+reports per second, the share lost and the longest gap, and every input (buttons, touch, trigger, grip, stick).
+Buttons (and keys) recentre, reset, buzz, and Mark the current yaw to read turns from there.
 
 ```sh
 pip install pyusb libusb-package
-python3 host/vrtest.py               # live view, ~500 Hz per controller
+python3 host/vrtest.py               # window
+python3 host/vrtest.py --text        # the same in the terminal
+python3 host/vrtest.py --sim         # the simulator's live mode instead of the dongle (see below)
 python3 host/vrtest.py --buzz right
 python3 host/vrtest.py --recenter
 ```
 
-Held naturally and pointed at the screen after `--recenter`, a controller reads yaw 0, pitch 0, roll 0. Turning left
-increases yaw, tipping the front up increases pitch and rolling left increases roll. On Linux add a udev rule for
-`1209:5151` (or run it as root). On Windows the VR interfaces get WinUSB by themselves.
+Checking the gyro:
+1. Set the controllers down for a second: *gyro calibrated* turns green.
+2. Hold one pointing at the screen and press Recentre: yaw, pitch and roll read about 0. Turning left increases
+   yaw, tipping the front up increases pitch and rolling left increases roll.
+3. Press Mark, turn a quarter turn left and back: *since mark* reads about +90°, then about 0.
+4. Set it down: after 5 s the drift shows; well under 1 °/min is good (first hardware run: 0.01–0.03 °/min).
+
+On Linux add a udev rule for `1209:5151` (or run it as root). On Windows the VR interfaces get WinUSB by themselves.
 
 ## Simulator (no dongle, no controllers)
 `sim/` runs the dongle firmware on a PC: the real `radio.rs`, `link.rs`, `pairing.rs`, `settings.rs`,

@@ -4,7 +4,7 @@
 - `cd firmware && cargo build --release` (+ `--features nicenano`) - firmware, target thumbv7em-none-eabihf; build both boards after firmware changes, zero warnings expected
 - `sh tools/package.sh` - builds both boards + `firmware/target/questpad.bin`, `questpad-nicenano.uf2`, `dist/*.zip`
 - `python host/mapping.py` - host self-test (CI runs it)
-- `python host/vrtest.py` - VR-mode check on real hardware (needs pyusb + libusb-package, dongle in VR mode)
+- `python host/vrtest.py` - VR-mode check window on real hardware (needs pyusb + libusb-package, dongle in VR mode); `--sim` reads sim live, `--text` terminal
 - Pure refactor of firmware? Prove it: `llvm-objcopy -O binary` the ELF and `cmp` with the previous `firmware/target/questpad.bin` (hw.rs / wdt.rs moves were byte-identical; moving code between modules can change inlining)
 
 ## Simulator (sim/)
