@@ -23,3 +23,8 @@ graphify-out/
 # Private research log (published summary: PROTOCOL.md)
 NOTES.md
 .claude.local.md
+
+# files copied from a UF2 bootloader drive (board flash dump, SoftDevice)
+CURRENT.UF2
+INDEX.HTM
+INFO_UF2.TXT
