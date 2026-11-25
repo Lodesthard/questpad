@@ -32,7 +32,7 @@ except ImportError:
     import serial
 
 from bridge import Bridge  # noqa: E402
-from mapping import ANALOG_MAX, LOG_ITEM_LEN, Hand  # noqa: E402
+from mapping import ANALOG_MAX, Hand, frame_notifications  # noqa: E402
 
 HOST, PORT = "127.0.0.1", 26760
 PROTOCOL = 1001
@@ -51,7 +51,7 @@ REST_SAMPLES, REST_GYRO, REST_ACCEL, REST_SHIFT = 250, 16, 48, 10  # samples; co
 MAX_OFFSET = 41  # counts (5 deg/s): anything steadier and larger is a slow turn, not an offset
 STICK_FULL = 32000
 DEFAULTS = dict(deadzone_pct=3, grip_pct=50, single_mode=1, gyro_left=0, imu_map_x=0x00, imu_map_y=0x82,
-                imu_map_z=0x01)
+                imu_map_z=0x01, imu_map_left_x=0x00, imu_map_left_y=0x82, imu_map_left_z=0x01)
 
 # Data packet buttons, as (byte, mask): byte 0 = D-pad / Options / R3 / L3 / Share, 1 = face (DS4 names;
 # clients call them Y B A X) and shoulders, 2 = Home. Touch button bits: 1 X / A, 2 Y / B, 4 stick, 8 menu.
@@ -141,6 +141,7 @@ class Rest:
 
     def __init__(self):
         self.offset = (0.0, 0.0, 0.0)  # gyro counts
+        self.epoch = 0  # +1 at each new offset (as gamepad.rs Rest::epoch)
         self.prev = None  # means of the last block, if it was still
         self._start()
 
@@ -162,6 +163,7 @@ class Rest:
         still = max(spread[:3]) < REST_ACCEL and max(spread[3:]) < REST_GYRO and max(map(abs, mean[3:])) < MAX_OFFSET
         if still and self.prev and max(abs(a - b) for a, b in zip(mean[:3], self.prev[:3])) < REST_SHIFT:
             self.offset = tuple((a + b) / 2 for a, b in zip(mean[3:], self.prev[3:]))
+            self.epoch += 1
         self.prev = mean if still else None
         self._start()
 
@@ -235,12 +237,13 @@ class Server:
         """One frame from the dongle: link joins / drops / data, and status replies (sides, battery)."""
         kind = f[0]
         with self.lock:
-            if kind == 0xA1 and f[3]:
-                c, p = self.ctls.get(f[1]), f[4:]
-                if c is None or len(p) <= 3 + LOG_ITEM_LEN or not p[2] & 0x40:
+            if kind == 0xA1:
+                slot, entries = frame_notifications(f) or (None, None)
+                c = self.ctls.get(slot)
+                if c is None:
                     return
                 ts = c.hand.imu_ts
-                c.hand.update(p[3 + LOG_ITEM_LEN :])
+                c.hand.update(entries)
                 if c.hand.imu_ts != ts:
                     self.rest[c.side].add(c.hand.accel, c.hand.gyro)
                     self._stream(c)
@@ -285,7 +288,7 @@ class Server:
             return
         s = self._settings
         gyro = [g - o for g, o in zip(c.hand.gyro, self.rest[c.side].offset)]
-        accel, gyro = motion(c.side, c.hand.accel, gyro, (s["imu_map_x"], s["imu_map_y"], s["imu_map_z"]))
+        accel, gyro = motion(c.side, c.hand.accel, gyro, Bridge.imu_map(s, c.side))
         pad = pad_bytes([(x.side, x.hand) for x in self.ctls.values()], s)
         payload = (self._info(i, c) + struct.pack("<BI", 1, 0) + pad
                    + struct.pack("<Q6f", self.clocks[i](c, c.hand.imu_ts), *accel, *gyro))

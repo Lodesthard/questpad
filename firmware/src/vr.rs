@@ -245,7 +245,7 @@ pub fn dropped(side: Side) {
 /// reference units: accel 1024 per g; gyro 8.192 per °/s with the exact resting offset removed; `ts` the
 /// controller's µs timestamp; `rest_epoch` changes whenever `gamepad::Rest` measures a new offset.
 pub fn imu(side: Side, accel: [f32; 3], gyro: [f32; 3], ts: u32, rest_epoch: u16) {
-    let (gyro, accel) = to_openxr(gyro, accel);
+    let (gyro, accel) = to_openxr(side, gyro, accel);
     const GYRO_SCALE: f32 = core::f32::consts::PI / 180.0 / 8.192;
     const ACCEL_SCALE: f32 = G / 1024.0;
     let w = gyro.map(|v| v * GYRO_SCALE);
@@ -310,10 +310,10 @@ pub fn publish(side: Side, inp: &Input) {
     REPORTS[side as usize].signal(r);
 }
 
-/// Controller IMU (right controller's axes) -> OpenXR controller frame, with the DS4 axis map
-/// from settings (x right, y up, z toward the user for a controller held naturally).
-fn to_openxr(gyro: [f32; 3], accel: [f32; 3]) -> ([f32; 3], [f32; 3]) {
-    let m = crate::settings::get().imu_map;
+/// Controller IMU (right controller's axes) -> OpenXR controller frame, with that hand's DS4 axis
+/// map from settings (x right, y up, z toward the user for a controller held naturally).
+fn to_openxr(side: Side, gyro: [f32; 3], accel: [f32; 3]) -> ([f32; 3], [f32; 3]) {
+    let m = crate::settings::get().imu_map_for(side == Side::Left);
     let map = |v: [f32; 3]| {
         [0, 1, 2].map(|i| {
             let x = v[((m[i] & 0x03) as usize).min(2)];

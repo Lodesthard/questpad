@@ -16,7 +16,9 @@ left raises roll. Press Mark, turn a quarter turn and back: "since mark" reads a
 still, "drift" should stay well under 1 °/min. Protocol: docs/vr.md.
 """
 import argparse
+import json
 import math
+import os
 import socket
 import struct
 import sys
@@ -26,7 +28,8 @@ import time
 VID, PID = 0x1209, 0x5151
 SUBCLASS = 0x51
 SIDES = {0x01: "left", 0x02: "right"}
-FLAGS = ((0x01, "conn"), (0x04, "ori"), (0x08, "gcal"), (0x10, "standby"), (0x20, "deadbat"))
+FLAG_CONN, FLAG_ORI, FLAG_GCAL = 0x01, 0x04, 0x08  # report flags: connected, orientation valid, gyro calibrated
+FLAGS = ((FLAG_CONN, "conn"), (FLAG_ORI, "ori"), (FLAG_GCAL, "gcal"), (0x10, "standby"), (0x20, "deadbat"))
 BUTTONS = ("A/X", "B/Y", "stick", "sys/menu")
 SIM_VIEW, SIM_CONTROL = ("127.0.0.1", 26770), ("127.0.0.1", 26771)  # sim/src/live.rs
 
@@ -170,6 +173,51 @@ class SimSource:
         self.sock.close()
 
 
+class Reader:
+    """Reads a source on its own thread (USB reads block): opens it, retrying every `retry` s while that fails
+    (`error` says why), and hands each batch of [(side, report dict)] to `feed(batch, time)`."""
+
+    def __init__(self, open_source, feed, retry=1.0):
+        self.open_source, self.feed, self.retry = open_source, feed, retry
+        self.src, self.error, self.running = None, "connecting...", True
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self):
+        while self.running:
+            if self.src is None:
+                try:
+                    self.src = self.open_source()
+                    self.error = None
+                except Exception as e:  # noqa: BLE001 - DongleError, or no libusb backend, access denied...
+                    self.error = str(e) or type(e).__name__
+                    time.sleep(self.retry)
+                    continue
+            try:
+                got = self.src.read()
+            except DongleError as e:
+                self.error = str(e)
+                self._close_src()
+                continue
+            self.feed([(side, s) for side, s in ((side, parse(r)) for side, r in got) if s], time.monotonic())
+        self._close_src()
+
+    def _close_src(self):
+        src, self.src = self.src, None
+        if src:
+            try:
+                src.close()
+            except Exception:  # noqa: BLE001 - already gone
+                pass
+
+    def send(self, side, cmd):
+        src = self.src
+        if src:
+            src.send(side, cmd)
+
+    def close(self):
+        self.running = False
+
+
 # ---- what the window and the terminal show ----
 
 STILL_GYRO_DPS = 3.0  # below this rotation rate and with |a| near 1 g, the controller counts as lying still
@@ -272,6 +320,121 @@ def run_text(src):
             print("  |  ".join(line(st) for st in stats.values() if st.s is not None) or "waiting for reports")
 
 
+# ---- controller models (assets/*.glb, optional: boxes without them) ----
+
+ASSETS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets")
+MODEL_FILES = {side: os.path.join(ASSETS, f"quest_2_controller_low_poly_{side}.glb") for side in ("left", "right")}
+MODEL_SIZE = 0.13  # metres, longest side of the drawn controller
+MODEL_CELL = 1 / 30  # vertex clustering grid, share of the longest side (fewer triangles: Tk draws each one)
+
+
+def load_glb(path):
+    """First mesh of a binary glTF file -> (vertices [(x, y, z)], triangles [(i, j, k)]). Plain positions:
+    node transforms and skinning are ignored."""
+    d = open(path, "rb").read()
+    if d[:4] != b"glTF":
+        raise ValueError("not a binary glTF file")
+    jlen = struct.unpack_from("<I", d, 12)[0]
+    j = json.loads(d[20:20 + jlen])
+    blob = d[20 + jlen + 8:]  # the BIN chunk follows the JSON chunk (8-byte chunk header)
+    fmts = {5121: "B", 5123: "H", 5125: "I", 5126: "f"}
+    sizes = {"SCALAR": 1, "VEC3": 3}
+
+    def accessor(i):
+        a = j["accessors"][i]
+        view = j["bufferViews"][a["bufferView"]]
+        fmt = "<" + fmts[a["componentType"]] * sizes[a["type"]]
+        stride = view.get("byteStride", struct.calcsize(fmt))
+        base = view.get("byteOffset", 0) + a.get("byteOffset", 0)
+        return [struct.unpack_from(fmt, blob, base + n * stride) for n in range(a["count"])]
+
+    prim = j["meshes"][0]["primitives"][0]
+    if prim.get("mode", 4) != 4:
+        raise ValueError("mesh is not made of triangles")
+    verts = accessor(prim["attributes"]["POSITION"])
+    idx = [t[0] for t in accessor(prim["indices"])]
+    return verts, [tuple(idx[i:i + 3]) for i in range(0, len(idx), 3)]
+
+
+def controller_model(path, cell=MODEL_CELL):
+    """Model in the controller frame (x right, y up, -z forward), centred, MODEL_SIZE long, simplified by
+    vertex clustering on a grid of `cell` x the longest side. The Blender export faces +z with y up: a half
+    turn about y puts the trigger at -z."""
+    verts, tris = load_glb(path)
+    verts = [(-x, y, -z) for x, y, z in verts]
+    lo = [min(v[i] for v in verts) for i in range(3)]
+    hi = [max(v[i] for v in verts) for i in range(3)]
+    scale = MODEL_SIZE / max(h - l for h, l in zip(hi, lo))
+    centre = [(h + l) / 2 for h, l in zip(hi, lo)]
+    verts = [tuple((v[i] - centre[i]) * scale for i in range(3)) for v in verts]
+    cell *= MODEL_SIZE
+    keys, sums, remap = {}, [], []
+    for v in verts:  # one vertex per grid cell (the mean of the ones in it)
+        key = tuple(round(c / cell) for c in v)
+        if key not in keys:
+            keys[key] = len(sums)
+            sums.append([0.0, 0.0, 0.0, 0])
+        k = keys[key]
+        s = sums[k]
+        s[0] += v[0]
+        s[1] += v[1]
+        s[2] += v[2]
+        s[3] += 1
+        remap.append(k)
+    out_verts = [(s[0] / s[3], s[1] / s[3], s[2] / s[3]) for s in sums]
+    out_tris, seen = [], set()
+    for a, b, c in tris:
+        t = (remap[a], remap[b], remap[c])
+        if len(set(t)) == 3 and frozenset(t) not in seen:
+            seen.add(frozenset(t))
+            out_tris.append(t)
+    return out_verts, out_tris
+
+
+def qmatrix(q):
+    """Rotation matrix (rows) of quaternion (x, y, z, w)."""
+    x, y, z, w = q
+    return ((1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)),
+            (2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)),
+            (2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)))
+
+
+LIGHT = (0.35, 0.8, 0.48)  # world direction toward the light (up, a little right and toward the viewer)
+
+
+def shade(colour, k):
+    r, g, b = (int(colour[i:i + 2], 16) for i in (1, 3, 5))
+    return "#%02x%02x%02x" % (int(r * k), int(g * k), int(b * k))
+
+
+def shades(colour, lo):
+    """16 flat-shading steps of `colour`, from `lo` (unlit) to full."""
+    return [shade(colour, lo + (1 - lo) * s / 15) for s in range(16)]
+
+
+def mesh_faces(model, q, pos):
+    """Model turned by `q` and moved to `pos` (camera at the origin, looking down -z) -> (world vertices,
+    [(i, j, k, light step 0..15)] for the faces toward the camera, far to near: the painter's order)."""
+    verts, tris = model
+    (m00, m01, m02), (m10, m11, m12), (m20, m21, m22) = qmatrix(q)
+    px, py, pz = pos
+    wv = [(px + m00 * a + m01 * b + m02 * c, py + m10 * a + m11 * b + m12 * c, pz + m20 * a + m21 * b + m22 * c)
+          for a, b, c in verts]
+    lx, ly, lz = LIGHT
+    faces = []
+    for i, j, k in tris:
+        A, B, C = wv[i], wv[j], wv[k]
+        ux, uy, uz = B[0] - A[0], B[1] - A[1], B[2] - A[2]
+        vx, vy, vz = C[0] - A[0], C[1] - A[1], C[2] - A[2]
+        nx, ny, nz = uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx
+        if nx * A[0] + ny * A[1] + nz * A[2] >= 0:  # facing away from the camera
+            continue
+        light = (nx * lx + ny * ly + nz * lz) / (math.sqrt(nx * nx + ny * ny + nz * nz) or 1.0)
+        faces.append((A[2] + B[2] + C[2], i, j, k, int(max(0.0, light) * 15)))
+    faces.sort()
+    return wv, [f[1:] for f in faces]
+
+
 # ---- the window ----
 
 BG, PANEL, GRID, TEXT, DIM, OK, BAD, WARN = ("#15171c", "#1c1f26", "#252932", "#d8dee9", "#7f8796", "#5ccf8a",
@@ -287,15 +450,21 @@ PANEL_H = 318  # stats panel height, in 96-dpi pixels
 
 
 class Window:
-    def __init__(self, root, open_source):
+    def __init__(self, root, open_source, use_models=True):
         import tkinter as tk
         import tkinter.font as tkfont
 
-        self.root, self.open_source = root, open_source
+        self.root = root
         self.stats = {side: Stats(side) for side in ("left", "right")}
+        self.models = {}
+        for side, path in MODEL_FILES.items():
+            try:
+                self.models[side] = controller_model(path) if use_models else None
+            except (OSError, ValueError, KeyError) as e:  # no assets/ (or an unreadable file): boxes
+                self.models[side] = None
+                if os.path.exists(path):
+                    print(f"{path}: {e}", file=sys.stderr)
         self.lock = threading.Lock()
-        self.src = None
-        self.error = "connecting..."
         self.last_rate = time.monotonic()
         self.k = root.winfo_fpixels("1i") / 96  # canvas coordinates follow the display scaling, like the fonts
         self.fonts = {(size, bold): tkfont.Font(family="Segoe UI", size=size, weight="bold" if bold else "normal")
@@ -319,40 +488,17 @@ class Window:
         keys = {"r": self.recenter, "x": self.reset, "m": self.mark, "1": lambda: self.buzz("left"),
                 "2": lambda: self.buzz("right"), "l": self.reset_lost}
         root.bind("<KeyPress>", lambda e: keys.get(e.keysym.lower(), lambda: None)())
-        self.running = True
         root.protocol("WM_DELETE_WINDOW", self.close)
-        threading.Thread(target=self.reader, daemon=True).start()
+        self.reader = Reader(open_source, self.feed)
         self.tick()
 
-    # ---- reading (own thread: USB reads block) ----
-
-    def reader(self):
-        while self.running:
-            if self.src is None:
-                try:
-                    self.src = self.open_source()
-                    self.error = None
-                except DongleError as e:
-                    self.error = str(e)
-                    time.sleep(1.0)
-                    continue
-            try:
-                got = self.src.read()
-            except DongleError as e:
-                self.error = str(e)
-                self.src.close()
-                self.src = None
-                continue
-            now = time.monotonic()
-            with self.lock:
-                for side, r in got:
-                    s = parse(r)
-                    if s:
-                        self.stats[side].feed(s, now)
+    def feed(self, batch, now):
+        with self.lock:
+            for side, s in batch:
+                self.stats[side].feed(s, now)
 
     def send(self, side, cmd):
-        if self.src:
-            self.src.send(side, cmd)
+        self.reader.send(side, cmd)
 
     def recenter(self):
         for side in self.stats:
@@ -376,7 +522,7 @@ class Window:
                 st.lost = 0
 
     def close(self):
-        self.running = False
+        self.reader.close()
         self.root.destroy()
 
     # ---- drawing ----
@@ -408,12 +554,25 @@ class Window:
                 c.create_text(*self.project(pos, w, h), text="not connected", fill=DIM, font=self.fonts[10, False])
                 continue
             q = st.s["quat"]
-            pts = [screen(v, q) for v in BOX]
-            for a, b in EDGES:
-                c.create_line(*pts[a], *pts[b], fill=COLOURS[side], width=2)
-            c.create_line(*screen((0, 0, -0.06), q), *screen((0, 0, -0.28), q), fill=COLOURS[side], width=3,
+            if self.models[side]:
+                self.draw_model(self.models[side], q, pos, COLOURS[side], w, h)
+            else:
+                pts = [screen(v, q) for v in BOX]
+                for a, b in EDGES:
+                    c.create_line(*pts[a], *pts[b], fill=COLOURS[side], width=2)
+                c.create_line(*screen((0, 0.02, 0), q), *screen((0, 0.07, 0), q), fill=COLOURS[side], width=2)
+            c.create_line(*screen((0, 0, -0.07), q), *screen((0, 0, -0.28), q), fill=COLOURS[side], width=3,
                           arrow="last")
-            c.create_line(*screen((0, 0.02, 0), q), *screen((0, 0.07, 0), q), fill=COLOURS[side], width=2)
+
+    def draw_model(self, model, q, pos, colour, w, h):
+        """Flat-shaded mesh: back faces culled, the rest drawn far to near."""
+        wv, faces = mesh_faces(model, q, pos)
+        sp = [self.project(p, w, h) for p in wv]
+        steps = shades(colour, 0.25)
+        create = self.canvas.create_polygon
+        for i, j, k, light in faces:
+            f = steps[light]
+            create(*sp[i], *sp[j], *sp[k], fill=f, outline=f)
 
     def draw_panel(self, st, x0, y0, w):
         """Stats of one controller in a box at (x0, y0), `w` wide. Offsets are 96-dpi pixels, scaled by k."""
@@ -505,8 +664,8 @@ class Window:
             pw = (w - 30) / 2
             for i, st in enumerate(self.stats.values()):
                 self.draw_panel(st, 10 + i * (pw + 10), scene_h + 4 * k, pw)
-        if self.error:
-            c.create_text(w / 2, 24 * k, text=self.error, fill=BAD, font=self.fonts[12, True])
+        if self.reader.error:
+            c.create_text(w / 2, 24 * k, text=self.reader.error, fill=BAD, font=self.fonts[12, True])
         self.root.after(33, self.tick)
 
 
@@ -514,6 +673,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--text", action="store_true", help="print to the terminal instead of opening a window")
     ap.add_argument("--sim", action="store_true", help="read the simulator's live mode over UDP instead of USB")
+    ap.add_argument("--boxes", action="store_true", help="draw boxes instead of the controller models (assets/)")
     ap.add_argument("--buzz", choices=("left", "right"), help="buzz one controller for 200 ms")
     ap.add_argument("--recenter", action="store_true", help="make both controllers' current heading yaw 0")
     args = ap.parse_args()
@@ -537,7 +697,7 @@ def main():
     import tkinter as tk
 
     root = tk.Tk()
-    Window(root, open_source)
+    Window(root, open_source, use_models=not args.boxes)
     root.mainloop()
 
 

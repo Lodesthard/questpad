@@ -10,11 +10,13 @@ const MAGIC: u32 = 0x3253_5051; // "QPS2": [magic][length][data words][checksum]
 const MAGIC_V1: u32 = 0x3153_5051; // "QPS1"
 /// Longest record `load` accepts (a later firmware's layout; extra bytes are ignored).
 const MAX_LEN: usize = 64;
-pub const LEN: usize = 20;
+pub const LEN: usize = 23;
 /// Older layouts, still read from flash: 15 bytes (1.0.x, no touchpad settings) and 18 (a 1.1.0
-/// pre-release).
-/// Shorter records (over USB too) get defaults for the missing settings.
+/// pre-release). Shorter records keep the base's values for the missing settings (`from_bytes_over`).
 const OLD_LENS: [usize; 2] = [18, 15];
+const MIN_LEN: usize = OLD_LENS[OLD_LENS.len() - 1];
+/// Length of the layouts before `imu_map_left` (one map for both hands then).
+const LEN_ONE_MAP: usize = 20;
 
 const NVMC_READY: u32 = 0x4001_E400;
 const NVMC_CONFIG: u32 = 0x4001_E504;
@@ -74,8 +76,8 @@ pub struct Settings {
     pub led_level: u8,
     /// Power the controllers off when the computer sleeps.
     pub off_on_suspend: bool,
-    /// Controller IMU -> DS4 axes, for gyro x / y / z (accel uses the same map): bits 0..1 =
-    /// source axis, bit 7 = negate.
+    /// Right controller IMU -> DS4 axes, for gyro x / y / z (accel uses the same map): bits 0..1 =
+    /// source axis, bit 7 = negate. Also the VR controller frame (vr.rs).
     pub imu_map: [u8; 3],
     /// DS4 touchpad: which touch sensors put the left / right thumb on its half of the touchpad.
     /// Bits 0 X / A, 1 Y / B, 2 stick, 3 trigger (0 = never).
@@ -89,6 +91,10 @@ pub struct Settings {
     /// Touch threshold for those sensors, % of the controller's own touch level (25..200; lower =
     /// more sensitive). 60 is about its "near" level, which catches a thumb on the rest.
     pub touch_pct: u8,
+    /// The same as `imu_map` for the left controller (its samples are first turned into the right
+    /// controller's axes, so the same map fits both unless one is set differently). Records from
+    /// before it copy `imu_map`, which then applied to both.
+    pub imu_map_left: [u8; 3],
 }
 
 pub const DEFAULT: Settings = Settings {
@@ -112,6 +118,7 @@ pub const DEFAULT: Settings = Settings {
     touch_both: false,
     touch_hold_10ms: 15,
     touch_pct: 60,
+    imu_map_left: [0x00, 0x82, 0x01],
 };
 
 impl Settings {
@@ -137,17 +144,35 @@ impl Settings {
             self.touch_both as u8,
             self.touch_hold_10ms,
             self.touch_pct,
+            self.imu_map_left[0],
+            self.imu_map_left[1],
+            self.imu_map_left[2],
         ]
+    }
+
+    /// The IMU axis map of the left or right controller.
+    pub fn imu_map_for(&self, left: bool) -> [u8; 3] {
+        if left { self.imu_map_left } else { self.imu_map }
     }
 
     /// Parse `LEN` bytes, or an older (shorter) layout with defaults for the rest.
     pub fn from_bytes(b: &[u8]) -> Option<Settings> {
-        if b.len() < OLD_LENS[OLD_LENS.len() - 1] {
+        Settings::from_bytes_over(&DEFAULT, b)
+    }
+
+    /// Parse `LEN` bytes, or an older (shorter) layout with `base`'s values for the rest: defaults
+    /// from flash, the current settings from an older control panel. A layout from before
+    /// `imu_map_left` had one map for both hands: it sets both.
+    pub fn from_bytes_over(base: &Settings, b: &[u8]) -> Option<Settings> {
+        if b.len() < MIN_LEN {
             return None;
         }
-        let mut full = DEFAULT.to_bytes();
+        let mut full = base.to_bytes();
         let n = b.len().min(LEN);
         full[..n].copy_from_slice(&b[..n]);
+        if n <= LEN_ONE_MAP {
+            full.copy_within(12..15, LEN_ONE_MAP);
+        }
         let b = &full;
         Some(Settings {
             mode: Mode::from(b[0]),
@@ -168,6 +193,7 @@ impl Settings {
             touch_both: b[17] != 0,
             touch_hold_10ms: b[18],
             touch_pct: b[19].clamp(25, 200),
+            imu_map_left: [b[20] & 0x83, b[21] & 0x83, b[22] & 0x83],
         })
     }
 }

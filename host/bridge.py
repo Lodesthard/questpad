@@ -259,19 +259,37 @@ class Bridge:
                 "single_mode", "gyro_left", "buzz_amp", "led_level", "off_on_suspend", "imu_map_x", "imu_map_y",
                 "imu_map_z", "touch_left", "touch_right", "touch_both",
                 "touch_hold_10ms",  # touch_*: firmware 1.1.0+
-                "touch_pct")  # 1.2.0+
+                "touch_pct",  # 1.2.0+
+                "imu_map_left_x", "imu_map_left_y", "imu_map_left_z")  # after 1.3.0 (imu_map_x/y/z: right only)
+    IMU_MAPS = {"right": ("imu_map_x", "imu_map_y", "imu_map_z"),
+                "left": ("imu_map_left_x", "imu_map_left_y", "imu_map_left_z")}
+
+    @classmethod
+    def imu_map(cls, s, side):
+        """A controller's IMU axis map, from settings as settings_get returns them."""
+        return tuple(s[k] for k in cls.IMU_MAPS[side])
+
     MODES = ("HID", "DS4", "XInput", "VR")  # VR: firmware after 1.3.0
     STATUS_DEAD_BATTERY, STATUS_STANDBY = 0x01, 0x10  # controller status flags (status()["flags"])
     PAIR_STATES = ("idle", "waiting", "writing", "done", "failed", "timed out", "cancelled")
 
-    def settings_get(self):
+    def _settings_raw(self):
         self.send(b"\x29")
         return dict(zip(self.SETTINGS, self._wait(0xA6)[1:]))
+
+    def settings_get(self):
+        """-> settings dict. Firmware with one IMU axis map for both hands (imu_maps 1) shows it as the left
+        map too, so readers need not care."""
+        s = self._settings_raw()
+        s["imu_maps"] = 2 if self.IMU_MAPS["left"][0] in s else 1
+        for left, right in zip(self.IMU_MAPS["left"], self.IMU_MAPS["right"]):
+            s.setdefault(left, s[right])
+        return s
 
     def settings_set(self, values, persist=True):
         """Write settings (dict as from settings_get). Persisting a new mode reboots the dongle
         into it (no reply; reconnect afterwards). Returns True on success."""
-        cur = self.settings_get()  # older firmware has fewer settings: send only the ones it has
+        cur = self._settings_raw()  # older firmware has fewer settings: send only the ones it has
         reboot = persist and values["mode"] != cur["mode"]
         self.send(bytes([0x2A] + [int(values[k]) & 0xFF for k in self.SETTINGS if k in cur] + [int(persist)]))
         return True if reboot else bool(self._wait(0xF0, timeout=2.0)[2])

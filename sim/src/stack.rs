@@ -289,13 +289,22 @@ pub fn serial_protocol(r: &mut Run) {
         s[1], s[2], s[4], s[6], s[7]
     ));
     let g = cmd(&[0x29]);
-    r.check(g[0] == 0xA6 && g.len() == 1 + settings::LEN && g[1] == 3, "SETTINGS_GET: 20 bytes, mode VR".into());
+    r.check(g[0] == 0xA6 && g.len() == 1 + settings::LEN && g[1] == 3, format!("SETTINGS_GET: {} bytes, mode VR", settings::LEN));
     let mut set = g[1..].to_vec();
     set[10] = 99; // LED level
     set.push(1); // persist
     let ok = cmd(&[[0x2A].as_slice(), &set].concat());
     r.check(ok == [0xF0, 0x2A, 1] && settings::get().led_level == 99, "SETTINGS_SET (persist): applied".into());
     r.check(settings::load().led_level == 99, "... and in flash".into());
+    // An older panel sends the 20-byte layout (one axis map), not persisted: both hands take its map,
+    // and the settings it doesn't know keep their values.
+    let mut short = set[..20].to_vec();
+    short[12..15].copy_from_slice(&[0x01, 0x82, 0x00]);
+    short.push(0);
+    let ok = cmd(&[[0x2A].as_slice(), &short].concat());
+    let s = settings::get();
+    r.check(ok == [0xF0, 0x2A, 1] && s.imu_map == [0x01, 0x82, 0x00] && s.imu_map_left == s.imu_map && s.led_level == 99,
+            "SETTINGS_SET, older 20-byte layout: its map on both hands, live".into());
     // Persisting stops the radio for the flash write and restarts the link: controllers drop and
     // rejoin (existing behaviour, worth knowing when saving from the panel during play).
     r.check(link::slots().is_empty(), "persisting restarts the link (controller dropped)".into());

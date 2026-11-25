@@ -42,6 +42,14 @@ def parse_notifications(buf):
         i += 2 + length
 
 
+def frame_notifications(f):
+    """Dongle serial frame -> (link slot, notification entries) for a controller's notifications (EV_LINK_DATA,
+    MIC ok, notification flag), else None."""
+    if f[0] == 0xA1 and len(f) > 7 + LOG_ITEM_LEN and f[3] and f[6] & 0x40:
+        return f[1], f[7 + LOG_ITEM_LEN:]
+    return None
+
+
 def encode_notification(nid, data, seq=0, last=0):
     """Inverse of parse_notifications (matches the controller's encoder; for tests)."""
     n = len(data)

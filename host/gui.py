@@ -1,4 +1,5 @@
-"""QuestPad control panel: pairing, mode, settings, controller status, motion for emulators, firmware.
+"""QuestPad control panel: pairing, mode, settings, controller status, motion for emulators, firmware, and
+(in DS4 and VR modes) 3DoF calibration with the controllers in 3D and the gyro axis map (calib.py).
 
 Run it with any Python 3 that has Tkinter (python.org installers do):
     python3 host/gui.py          (or double-click "QuestPad.pyw" / "QuestPad.command")
@@ -22,13 +23,16 @@ try:
 except ImportError:
     sys.path.insert(0, os.path.join(HERE, "vendor"))
 
+import calib  # noqa: E402
 import dsu  # noqa: E402
 from bridge import Bridge  # noqa: E402
-from mapping import LOG_ITEM_LEN, Hand  # noqa: E402
+from mapping import Hand, frame_notifications  # noqa: E402
 
 # Panel preferences (not dongle settings): %APPDATA%\QuestPad on Windows, ~/.config/questpad elsewhere.
 PREFS = os.path.join(os.environ["APPDATA"], "QuestPad", "panel.json") if os.environ.get("APPDATA") else \
     os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "questpad", "panel.json")
+MIN_WIDTH = 560  # the window without the calibration panel
+CALIB_EXTRA = 240  # pixels the window opens wider than its minimum with the panel, for the 3D view
 FIRMWARE_DIRS = [ROOT, os.path.join(ROOT, "firmware"), os.path.join(ROOT, "firmware", "target")]
 BOOTLOADER_HELP = {
     False: "1. Plug in the dongle.\n2. Press its small sideways RESET button (the red LED pulses).\n3. Click OK.",
@@ -43,7 +47,7 @@ MODE_HELP = {
        "Motion for emulators below.",
     2: "XInput (Xbox 360 controller): native in Windows games, also Linux and macOS. No gyro, and no motion for "
        "emulators. This app can't reach the dongle in this mode: to leave it, hold Oculus / Menu with the trigger "
-       "pulled for 5 s, or the dongle's button for 3 s.",
+       "pulled for 5 s, or the dongle's button for 3 s (nice!nano, no button: a wire from P1.06 to GND).",
     3: "VR (two 3DoF controllers): for an OpenXR runtime such as a Monado fork on an Android phone, with the "
        "dongle plugged into the phone. Each controller is its own device with orientation, buttons, stick, "
        "trigger, grip and haptics. Not a gamepad. Setup: docs/vr.md.",
@@ -70,21 +74,31 @@ class Worker(threading.Thread):
         self.cmds = queue.Queue()
         self.bridge = None
         self.paused = False
-        self.tap = None  # sees every frame from the dongle, on this thread (the motion server's feed)
+        # Functions that see every frame from the dongle, on this thread: the motion server's and the calibration
+        # view's feeds (name -> fn).
+        self.taps = {}
 
     def call(self, fn, done=None, fail=None):
         """Run fn(bridge) on the worker; done(result) / fail(error) run on the GUI thread."""
         self.cmds.put((fn, done, fail))
 
-    def set_tap(self, fn):
-        self.tap = fn
-        if self.bridge:
-            self.bridge.tap = fn
+    def set_tap(self, name, fn):
+        """Feed every frame to fn (None: stop feeding `name`)."""
+        taps = dict(self.taps)
+        if fn:
+            taps[name] = fn
+        else:
+            taps.pop(name, None)
+        self.taps = taps  # replaced whole: the worker iterates the old one safely
+
+    def _tap(self, f):
+        for fn in self.taps.values():
+            fn(f)
 
     def _connect(self):
         try:
             self.bridge = Bridge()
-            self.bridge.tap = self.tap
+            self.bridge.tap = self._tap
             self.events.put(("connected", self.bridge.ping()[1]))
         except (SystemExit, Exception):
             self.bridge = None
@@ -120,8 +134,9 @@ class Worker(threading.Thread):
                     last_status = time.time()
                     self.events.put(("status", self.bridge.status()))
                 for f in self.bridge.frames(0.03):
-                    # Live input frames are disposable: never let them pile up if the window stalls.
-                    if f[0] != 0xA1 or self.events.qsize() < 200:
+                    # Live input frames (~1000/s) only go to the taps, on this thread: the window reads what
+                    # they left (App._inputs), so it never queues them.
+                    if f[0] != 0xA1:
                         self.events.put(("frame", f))
             except (SystemExit, Exception):
                 try:
@@ -149,19 +164,22 @@ class App:
     def __init__(self, root, demo=False):
         self.root = root
         root.title("QuestPad")
-        root.minsize(560, 0)
+        root.minsize(MIN_WIDTH, 0)
         self.events = queue.Queue()
         self.worker = Worker(self.events)
-        self.hands = {}  # slot -> (side, Hand)
+        self.hands = {}  # slot -> (side, Hand), updated on the worker thread (_input)
+        self.changed = set()  # slots whose inputs changed since the window last showed them
         self.settings = None
         self.connected = False
         self.version = ""
         self.motion = None  # dsu.Server while motion for emulators is on
+        self.demo = demo
         self._build()
         if demo:
             self._demo()
             return
         root.protocol("WM_DELETE_WINDOW", self._quit)
+        self.worker.set_tap("inputs", self._input)
         self.worker.start()
         if self._prefs().get("motion"):
             self.motion_var.set(1)
@@ -174,7 +192,8 @@ class App:
         self._show_settings(dict(mode=1, deadzone_pct=3, grip_pct=50, idle_min=10, off_hold_s=3, connect_buzz=1,
                                  low_batt_pct=10, single_mode=1, gyro_left=0, buzz_amp=200, led_level=40,
                                  off_on_suspend=1, imu_map_x=0, imu_map_y=0x82, imu_map_z=1, touch_left=7,
-                                 touch_right=7, touch_both=0, touch_hold_10ms=15, touch_pct=60))
+                                 touch_right=7, touch_both=0, touch_hold_10ms=15, touch_pct=60,
+                                 imu_map_left_x=0, imu_map_left_y=0x82, imu_map_left_z=1))
         self._on_status(dict(mode="DS4", paired=True, pair_state="idle",
                              controllers=[(1, "left", 100), (2, "right", 80)]))
         self.ctl_rows["left"][2].set(".Y.. stick  +12, +71  trig   0  grip  86")
@@ -186,8 +205,10 @@ class App:
 
     def _build(self):
         pad = dict(padx=8, pady=4)
-        main = ttk.Frame(self.root, padding=8)
-        main.pack(fill="both", expand=True)
+        self.main = main = ttk.Frame(self.root, padding=8)
+        main.pack(side="left", fill="both", expand=True)
+        # 3DoF calibration (calib.py), on the right in DS4 and VR modes
+        self.calib = calib.CalibPanel(self.root, self._apply_maps, self._show_calib, demo=self.demo)
 
         top = ttk.Frame(main)
         top.pack(fill="x", **pad)
@@ -309,6 +330,7 @@ class App:
                 getattr(self, "_on_" + kind)(data)
         except queue.Empty:
             pass
+        self._inputs()
         self.root.after(50, self._poll)
 
     def _on_connected(self, version):
@@ -320,7 +342,7 @@ class App:
     def _on_disconnected(self, _):
         if self.connected or not self.status_var.get().startswith("Dongle not found"):
             self.status_var.set("Dongle not found. Plug it in (to leave XInput mode, hold Oculus / Menu with the "
-                                "trigger pulled for 5 s, or the dongle's button for 3 s).")
+                                "trigger pulled for 5 s, or the dongle's button for 3 s; nice!nano: P1.06 to GND).")
         self.connected = False
         for state, batt, inputs in self.ctl_rows.values():
             state.set("-")
@@ -329,6 +351,7 @@ class App:
         if self.motion:
             self.motion.clear()
         self._show_motion()
+        self.calib.set_mode(None)
 
     def _on_error(self, text):
         messagebox.showerror("QuestPad", text)
@@ -341,6 +364,7 @@ class App:
         mode = st["mode"]
         paired = "paired" if st["paired"] else "not paired yet"
         self.status_var.set(f"Connected - {mode} mode, {paired}")
+        self.calib.set_mode(mode)
         seen = set()
         for slot, side, battery in st["controllers"]:
             seen.add(side)
@@ -374,16 +398,27 @@ class App:
         if f[0] == 0xA7:  # pairing progress
             ps = Bridge.PAIR_STATES[f[1]] if f[1] < len(Bridge.PAIR_STATES) else ""
             self.pair_var.set(PAIR_TEXT.get(ps, ps))
-        elif f[0] == 0xA1 and f[3] and f[1] in self.hands:
-            p = f[4:]
-            if len(p) > 3 + LOG_ITEM_LEN and p[2] & 0x40:
-                side, h = self.hands[f[1]]
-                h.update(p[3 + LOG_ITEM_LEN:])
+
+    def _input(self, f):
+        """Worker tap: a controller's notifications update its Hand (the window shows it in _inputs)."""
+        slot, entries = frame_notifications(f) or (None, None)
+        hand = self.hands.get(slot)
+        if hand:
+            hand[1].update(entries)
+            self.changed.add(slot)
+
+    def _inputs(self):
+        changed, self.changed = self.changed, set()
+        for slot in changed:
+            side, h = self.hands.get(slot, (None, None))
+            if side:
                 names = "ABS*" if side == "right" else "XYS*"
                 btn = "".join(n if h.buttons >> i & 1 else "." for i, n in enumerate(names))
-                self.ctl_rows[side][2].set(
-                    f"{btn} stick {h.stick[0] // 330:+4d},{h.stick[1] // 330:+4d}  "
-                    f"trig {h.trigger * 100 // 4095:3d}  grip {h.grip * 100 // 4095:3d}")
+                text = (f"{btn} stick {h.stick[0] // 330:+4d},{h.stick[1] // 330:+4d}  "
+                        f"trig {h.trigger * 100 // 4095:3d}  grip {h.grip * 100 // 4095:3d}")
+                var = self.ctl_rows[side][2]
+                if var.get() != text:  # most frames only bring IMU samples
+                    var.set(text)
 
     # ---- actions ----
 
@@ -465,7 +500,8 @@ class App:
         if mode == 2 and not messagebox.askyesno(
                 "XInput mode", "In XInput mode this app can't talk to the dongle. To come back, hold Oculus or "
                                "Menu with the trigger pulled all the way for 5 seconds, or the dongle's button for "
-                               "3 seconds (both cycle HID -> DS4 -> XInput -> VR). Switch now?"):
+                               "3 seconds (nice!nano: a wire from P1.06 to GND; both cycle HID -> DS4 -> XInput -> "
+                               "VR). Switch now?"):
             return
         new = dict(self.settings, mode=mode)
         self.worker.call(lambda b: b.settings_set(new))
@@ -498,9 +534,9 @@ class App:
                 return
             if self.settings:
                 self.motion.settings = self.settings
-            self.worker.set_tap(self.motion.feed)
+            self.worker.set_tap("motion", self.motion.feed)
         elif not self.motion_var.get() and self.motion:
-            self.worker.set_tap(None)
+            self.worker.set_tap("motion", None)
             self.motion.close()
             self.motion = None
         if remember:
@@ -517,6 +553,7 @@ class App:
                                         "waiting for the dongle (HID or DS4 mode)"))
 
     def _quit(self):
+        self.calib.close()
         if self.motion:
             self.motion.close()  # emulators see the controllers leave, and ask again next time
         self.root.destroy()
@@ -532,6 +569,7 @@ class App:
             v.set(s.get(k, 0x07) >> bit & 1)
         self.mode_var.set(s["mode"])
         self._mode_help()
+        self.calib.set_settings(s)
 
     def _save_settings(self):
         if not self._need() or self.settings is None:
@@ -550,10 +588,53 @@ class App:
                 self.settings = new
                 if self.motion:
                     self.motion.settings = new
+                self.calib.set_settings(new)
                 self.status_var.set("Settings saved.")
             else:
                 messagebox.showerror("QuestPad", "The dongle didn't accept the settings.")
         self.worker.call(lambda b: b.settings_set(new), done)
+
+    # ---- 3DoF calibration (calib.py) ----
+
+    def _show_calib(self, visible):
+        """DS4 / VR mode: the calibration view on the right, fed with every frame from the dongle."""
+        if visible:
+            self.main.pack_configure(expand=False, fill="y")
+            self.calib.pack(side="left", fill="both", expand=True)
+            self.worker.set_tap("calib", self.calib.host.feed)
+            # Every widget asks for its smallest size (the 3D view grows into what is left): the window can't
+            # get narrower than that, and opens with room for the view.
+            self.root.update_idletasks()
+            need = self.root.winfo_reqwidth()
+            self.root.minsize(need, 0)
+            if self.root.winfo_width() < need + CALIB_EXTRA:
+                self.root.geometry(f"{min(need + CALIB_EXTRA, self.root.winfo_screenwidth() - 40)}x"
+                                   f"{self.root.winfo_height()}")
+        else:
+            self.worker.set_tap("calib", None)
+            self.calib.pack_forget()
+            self.main.pack_configure(expand=True, fill="both")
+            self.root.minsize(MIN_WIDTH, 0)
+
+    def _apply_maps(self, maps, persist, done):
+        """Send the controllers' gyro axis maps ({side: imu_map}): live only (persist False, gone when the dongle
+        restarts) or saved. Firmware with one map for both takes the right one's (settings_set sends only what
+        the firmware has)."""
+        if not self.connected or self.settings is None:
+            done(False)
+            return
+        new = dict(self.settings)
+        for side, m in maps.items():
+            new.update(zip(Bridge.IMU_MAPS[side], m))
+
+        def ok(result):
+            if result:
+                if persist:
+                    self.settings = new
+                if self.motion:
+                    self.motion.settings = new  # emulators get the gyro the way the dongle now maps it
+            done(bool(result))
+        self.worker.call(lambda b: b.settings_set(new, persist=persist), ok, lambda e: done(False))
 
     def _update_firmware(self):
         # The dongle takes questpad.bin, the nice!nano questpad-nicenano.uf2 (through its UF2 drive).

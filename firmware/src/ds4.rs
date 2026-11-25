@@ -321,7 +321,7 @@ fn imu_axes(p: &Pad) -> ([i16; 3], [i16; 3]) {
     // Touch: 8.192 LSB/(deg/s) -> 16.384; 1024 LSB/g -> 8192.
     let gyro = [sat(g[0] as i32 * 2), sat(g[1] as i32 * 2), sat(g[2] as i32 * 2)];
     let accel = [sat(a[0] as i32 * 8), sat(a[1] as i32 * 8), sat(a[2] as i32 * 8)];
-    let m = crate::settings::get().imu_map;
+    let m = crate::settings::get().imu_map_for(p.imu_left);
     let pick = |v: &[i16; 3], i: usize| {
         let axis = (m[i] & 0x03) as usize;
         let x = v[axis.min(2)];

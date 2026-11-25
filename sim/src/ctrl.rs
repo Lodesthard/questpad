@@ -144,9 +144,10 @@ impl Controller {
     }
 
     /// Controller frame (OpenXR axes) -> the Touch IMU's raw axes: the inverse of what the firmware
-    /// does (`left_to_right_frame` for the left hand, then `settings::imu_map`).
+    /// does with the default settings (`left_to_right_frame` for the left hand, then the default
+    /// `imu_map`: how the IMU really sits; a changed map then shows in the reports).
     fn to_raw(&self, v: Vec3) -> Vec3 {
-        let m = crate::settings::get().imu_map;
+        let m = crate::settings::DEFAULT.imu_map;
         let mut right = [0.0; 3];
         for i in 0..3 {
             let axis = ((m[i] & 0x03) as usize).min(2);

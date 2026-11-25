@@ -31,7 +31,7 @@ const CMD_LINK_REQ: u8 = 0x26; // slot u8, reg u8, read u8, data... (TL request;
 const CMD_LINK_SLOTS: u8 = 0x27;
 const CMD_POWER_OFF: u8 = 0x28; // power off all controllers
 const CMD_SETTINGS_GET: u8 = 0x29;
-const CMD_SETTINGS_SET: u8 = 0x2A; // settings [settings::LEN], persist u8 (a mode change reboots)
+const CMD_SETTINGS_SET: u8 = 0x2A; // settings [settings::LEN or an older, shorter layout], persist u8 (a mode change reboots)
 const CMD_PAIR_START: u8 = 0x2B; // start pairing (or cancel it)
 const CMD_PAIR_EXPORT: u8 = 0x2C;
 const CMD_PAIR_FORGET: u8 = 0x2D;
@@ -180,9 +180,11 @@ pub fn handle(cmd: &[u8], out: &mut [u8]) -> usize {
             out[1..1 + settings::LEN].copy_from_slice(&settings::get().to_bytes());
             return 1 + settings::LEN;
         }
-        CMD_SETTINGS_SET if a.len() >= settings::LEN + 1 => {
-            let Some(new) = settings::Settings::from_bytes(a) else { return 0 };
-            let ok = if a[settings::LEN] != 0 {
+        CMD_SETTINGS_SET if !a.is_empty() => {
+            // An older panel sends fewer settings: the ones it doesn't know keep their current values.
+            let (data, persist) = a.split_at(a.len() - 1);
+            let Some(new) = settings::Settings::from_bytes_over(&settings::get(), data) else { return 0 };
+            let ok = if persist[0] != 0 {
                 let mode_changed = new.mode != settings::get().mode;
                 let running = link::running();
                 radio::stop();

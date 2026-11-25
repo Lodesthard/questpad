@@ -53,6 +53,8 @@ pub struct Pad {
     /// Lowest battery % among connected controllers (None if none connected).
     pub battery: Option<u8>,
     pub imu: Imu,
+    /// `imu` comes from the left controller (it has its own axis map).
+    pub imu_left: bool,
     pub connected: u8,
     /// Thumb down on the sensors chosen in settings (`touch_left` / `touch_right`): bit 0 left, bit 1 right.
     pub thumbs: u8,
@@ -579,6 +581,7 @@ fn build() -> Pad {
         }
         if is_gyro_source(slot) {
             p.imu = h.imu;
+            p.imu_left = side == Side::Left;
         }
     }
     p

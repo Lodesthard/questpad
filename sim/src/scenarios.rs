@@ -28,6 +28,7 @@ const SCENARIOS: &[(&str, &str, fn(&mut Run))] = &[
     ("imu_units_reported", "controller with 4x finer gyro / 2x finer accel units, reported in 0x32", imu_units_reported),
     ("imu_units_missing", "the same controller without the 0x32 answer: why the read matters", imu_units_missing),
     ("imu_units_rejected", "implausible 0x32 answers are ignored", imu_units_rejected),
+    ("imu_map_per_hand", "left axis map set apart (half turn about yaw): only the left reports change", imu_map_per_hand),
     ("stack_link_join", "stack: paired controller wakes, follows the hopping, joins; MIC, 0x32, VR reports", crate::stack::link_join),
     ("stack_pairing_button", "stack: blank dongle, button tap, DM pairing over the air, record stored, joins", crate::stack::pairing_button),
     ("stack_pairing_timeout", "stack: pairing with no controller gives up after 90 s", crate::stack::pairing_timeout),
@@ -213,6 +214,32 @@ fn rotation_checks(r: &mut Run, s: usize) {
     r.below("worst error while moving", worst, 4.0);
     let e = r.err(s);
     r.below("final error", e, 2.0);
+}
+
+fn imu_map_per_hand(r: &mut Run) {
+    // Left map = a half turn about y (x and z negated): a proper rotation, so its fusion still works.
+    let mut s = crate::settings::get();
+    s.imu_map_left = [0x80, 0x82, 0x81];
+    crate::settings::set_volatile(&s);
+    r.c[L].join();
+    r.c[R].join();
+    r.still(0.5);
+    // Both pitch up about their own x at 45 °/s: the left reports it about -x, the right about +x.
+    let w = [45f64.to_radians(), 0.0, 0.0];
+    for _ in 0..frames(0.5) {
+        r.frame([w, w]);
+    }
+    for (i, name, want) in [(L, "left (map applied)", -45.0), (R, "right (default map)", 45.0)] {
+        let g = r.report(i).gyro.map(|v| (v as f64).to_degrees());
+        let ok = (g[0] - want).abs() < 2.0 && g[1].abs() < 2.0 && g[2].abs() < 2.0;
+        r.check(ok, format!("{name} gyro {:+.1} {:+.1} {:+.1} °/s (want {want:+.0} 0 0)", g[0], g[1], g[2]));
+    }
+    // A layout from before the left map (flash record, or an older panel over USB) sets both maps.
+    let mut old = crate::settings::DEFAULT.to_bytes();
+    old[12..15].copy_from_slice(&[0x01, 0x82, 0x80]);
+    let parsed = crate::settings::Settings::from_bytes_over(&s, &old[..20]).unwrap();
+    r.check(parsed.imu_map == [0x01, 0x82, 0x80] && parsed.imu_map_left == [0x01, 0x82, 0x80],
+            "20-byte layout: its one map on both hands".into());
 }
 
 fn rotations_right(r: &mut Run) {
